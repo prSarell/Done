@@ -6,8 +6,10 @@ struct ContentView: View {
             PromptsView()
                 .tabItem { Label("Prompts", systemImage: "text.quote") }
 
-            TimerView()
-                .tabItem { Label("Timer", systemImage: "timer") }
+            NavigationStack {
+                TimerView()   // now unambiguous
+            }
+            .tabItem { Label("Timer", systemImage: "timer") }
 
             RewardsView()
                 .tabItem { Label("Rewards", systemImage: "gift") }
@@ -17,5 +19,6 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+        .environmentObject(TimerNotesViewModel())
 }
 

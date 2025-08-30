@@ -1,9 +1,15 @@
+// File: Done/Views/TimerView.swift
 import SwiftUI
 
 struct TimerView: View {
+    @EnvironmentObject private var notesVM: TimerNotesViewModel   // <-- get the VM from DoneApp
+
     @State private var seconds: Int = 0
     @State private var running = false
     @State private var timer: Timer?
+
+    @State private var showCompleteSheet = false
+    @State private var noteText: String = ""
 
     var body: some View {
         VStack(spacing: 16) {
@@ -20,6 +26,15 @@ struct TimerView: View {
 
                 Button("Reset") { reset() }
                     .buttonStyle(.bordered)
+
+                Button("Complete") {
+                    pause()
+                    noteText = ""
+                    showCompleteSheet = true
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .disabled(seconds == 0)
             }
 
             Spacer()
@@ -27,7 +42,41 @@ struct TimerView: View {
         .padding()
         .onDisappear { timer?.invalidate() }
         .navigationTitle("Timer")
+        .sheet(isPresented: $showCompleteSheet) {
+            NavigationStack {
+                Form {
+                    Section("Optional note") {
+                        TextField("What did you do / how did it go?", text: $noteText, axis: .vertical)
+                            .textInputAutocapitalization(.sentences)
+                            .lineLimit(3, reservesSpace: true)
+                    }
+                    Section("Duration") {
+                        Text(formatted(seconds))
+                            .font(.title3.monospacedDigit())
+                    }
+                }
+                .navigationTitle("Save Session")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showCompleteSheet = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") {
+                            let text = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let finalText = text.isEmpty ? "Timer session" : text
+                            notesVM.add(text: finalText, durationSeconds: seconds)
+                            reset()
+                            showCompleteSheet = false
+                        }
+                        .disabled(seconds == 0)
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+        }
     }
+
+    // MARK: - Timer controls
 
     private func start() {
         running = true
@@ -56,12 +105,5 @@ struct TimerView: View {
 }
 
 #Preview {
-    TimerView()
+    TimerView().environmentObject(TimerNotesViewModel())
 }
-//
-//  TimerView.swift
-//  Done
-//
-//  Created by Patrick Sarell on 23/8/2025.
-//
-

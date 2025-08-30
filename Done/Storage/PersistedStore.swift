@@ -1,5 +1,7 @@
 import Foundation
 
+/// Tiny JSON file store for arrays of Codable items.
+/// Files live in the app's Documents directory; atomic writes to avoid corruption.
 public final class PersistedStore<Item: Codable> {
     private let fileURL: URL
     private let encoder = JSONEncoder()
