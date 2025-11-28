@@ -1,7 +1,5 @@
 import SwiftUI
 
-// MARK: - Shared models
-
 // Codable-friendly model
 struct PromptItem: Identifiable, Hashable, Codable {
     var id: UUID
@@ -20,14 +18,12 @@ enum PromptCategory: String, CaseIterable, Identifiable, Codable {
     case yearly = "Yearly"
     case events = "Events"
     case study = "Study"
-    case mentalHealth = "Mental Health"
+    case mentalHealth = "Health"
 
     var id: String { rawValue }
 }
 
-// MARK: - Small subviews
-
-/// Small extracted view to keep the compiler happy
+// Small extracted view to keep the compiler happy
 private struct CategoryTabButton: View {
     let category: PromptCategory
     let isSelected: Bool
@@ -55,20 +51,22 @@ private struct CategoryTabButton: View {
     }
 }
 
-/// Single row for a prompt, with optional Alert pill(s)
+// Single row for a prompt, with optional Alert pill(s)
 private struct PromptRow: View {
     let item: PromptItem
     let category: PromptCategory
 
-    let dailyLabel: String
-    let weeklyLabel: String
-    let monthlyLabel: String
     let yearlyLabel: String
+    let monthlyLabel: String
+    let eventLabel: String
+    let studyLabel: String
+    let mentalLabel: String
 
-    let onDailyTap: () -> Void
-    let onWeeklyTap: () -> Void
-    let onMonthlyTap: () -> Void
     let onYearlyTap: () -> Void
+    let onMonthlyTap: () -> Void
+    let onEventTap: () -> Void
+    let onStudyTap: () -> Void
+    let onMentalTap: () -> Void
 
     var body: some View {
         HStack {
@@ -77,22 +75,9 @@ private struct PromptRow: View {
             Spacer()
 
             switch category {
-            case .daily:
-                Button(action: onDailyTap) {
-                    Text(dailyLabel)
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .stroke(Color.accentColor, lineWidth: 1)
-                        )
-                }
-                .buttonStyle(.plain)
-
-            case .weekly:
-                Button(action: onWeeklyTap) {
-                    Text(weeklyLabel)
+            case .yearly:
+                Button(action: onYearlyTap) {
+                    Text(yearlyLabel)
                         .font(.caption)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
@@ -116,9 +101,35 @@ private struct PromptRow: View {
                 }
                 .buttonStyle(.plain)
 
-            case .yearly:
-                Button(action: onYearlyTap) {
-                    Text(yearlyLabel)
+            case .events:
+                Button(action: onEventTap) {
+                    Text(eventLabel)
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .stroke(Color.accentColor, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+
+            case .study:
+                Button(action: onStudyTap) {
+                    Text(studyLabel)
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .stroke(Color.accentColor, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+
+            case .mentalHealth:
+                Button(action: onMentalTap) {
+                    Text(mentalLabel)
                         .font(.caption)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
@@ -135,8 +146,6 @@ private struct PromptRow: View {
         }
     }
 }
-
-// MARK: - Main view
 
 struct PromptsView: View {
     @State private var selectedCategory: PromptCategory = .daily
@@ -156,28 +165,32 @@ struct PromptsView: View {
     // Rules (keyed by prompt text to match PromptRulesStore)
     @State private var rules: [String: PromptRule] = [:]
 
-    // DAILY alert editing
-    @State private var editingDailyPromptText: String?
-    @State private var showingDailySheet = false
-    @State private var dailyTempTime: Date = Date()
+    // Yearly alert editing
+    @State private var editingYearlyPromptText: String?
+    @State private var showingYearlySheet = false
+    @State private var yearlyTempMonth: Int = 1
+    @State private var yearlyTempDay: Int = 1
 
-    // WEEKLY alert editing
-    @State private var editingWeeklyPromptText: String?
-    @State private var showingWeeklySheet = false
-    @State private var weeklyTempWeekday: Int = 2   // 1=Sun..7=Sat (Calendar), default Monday
-    @State private var weeklyTempTime: Date = Date()
-
-    // MONTHLY alert editing
+    // Monthly alert editing
     @State private var editingMonthlyPromptText: String?
     @State private var showingMonthlySheet = false
     @State private var monthlyTempDay: Int = 1
     @State private var monthlyIsLastDay: Bool = false
 
-    // YEARLY alert editing
-    @State private var editingYearlyPromptText: String?
-    @State private var showingYearlySheet = false
-    @State private var yearlyTempMonth: Int = 1
-    @State private var yearlyTempDay: Int = 1
+    // Events (one-off) alert editing
+    @State private var editingEventPromptText: String?
+    @State private var showingEventSheet = false
+    @State private var eventTempDate: Date = Date().addingTimeInterval(3600) // default = 1h from now
+
+    // Study (one-off) alert editing
+    @State private var editingStudyPromptText: String?
+    @State private var showingStudySheet = false
+    @State private var studyTempDate: Date = Date().addingTimeInterval(3600)
+
+    // Mental Health (one-off) alert editing
+    @State private var editingMentalPromptText: String?
+    @State private var showingMentalSheet = false
+    @State private var mentalTempDate: Date = Date().addingTimeInterval(3600)
 
     // Grid layout for two visible rows (4 on first row, remaining wrap to second)
     private let tabColumns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
@@ -185,6 +198,7 @@ struct PromptsView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 12) {
+
                 // ---- Two-line tab grid ----
                 let categories = PromptCategory.allCases
                 LazyVGrid(columns: tabColumns, alignment: .center, spacing: 8) {
@@ -200,6 +214,7 @@ struct PromptsView: View {
 
                 List {
                     addSection
+
                     listSection
                 }
                 .listStyle(.insetGrouped)
@@ -210,7 +225,7 @@ struct PromptsView: View {
                 await loadFromDisk()
                 loadRules()
             }
-            // Save prompts when any category changes
+            // Save prompts when any category changes (iOS 17-style onChange)
             .onChange(of: dailyItems)        { _, _ in saveToDisk() }
             .onChange(of: weeklyItems)       { _, _ in saveToDisk() }
             .onChange(of: monthlyItems)      { _, _ in saveToDisk() }
@@ -220,23 +235,30 @@ struct PromptsView: View {
             .onChange(of: mentalHealthItems) { _, _ in saveToDisk() }
             // Save rules when changed
             .onChange(of: rules) { _, _ in saveRules() }
-            // Sheets
-            .sheet(isPresented: $showingDailySheet) {
-                dailyAlertSheet()
+            // Yearly editor sheet
+            .sheet(isPresented: $showingYearlySheet) {
+                yearlyAlertSheet()
             }
-            .sheet(isPresented: $showingWeeklySheet) {
-                weeklyAlertSheet()
-            }
+            // Monthly editor sheet
             .sheet(isPresented: $showingMonthlySheet) {
                 monthlyAlertSheet()
             }
-            .sheet(isPresented: $showingYearlySheet) {
-                yearlyAlertSheet()
+            // Events editor sheet
+            .sheet(isPresented: $showingEventSheet) {
+                eventAlertSheet()
+            }
+            // Study editor sheet
+            .sheet(isPresented: $showingStudySheet) {
+                studyAlertSheet()
+            }
+            // Mental Health editor sheet
+            .sheet(isPresented: $showingMentalSheet) {
+                mentalAlertSheet()
             }
         }
     }
 
-    // MARK: - Sections
+    // MARK: - Sections broken out
 
     private var addSection: some View {
         Section(header: Text("Add \(selectedCategory.rawValue) Item")) {
@@ -263,14 +285,16 @@ struct PromptsView: View {
                     PromptRow(
                         item: item,
                         category: selectedCategory,
-                        dailyLabel: dailyAlertLabel(for: item),
-                        weeklyLabel: weeklyAlertLabel(for: item),
-                        monthlyLabel: monthlyAlertLabel(for: item),
                         yearlyLabel: yearlyAlertLabel(for: item),
-                        onDailyTap: { startEditingDaily(for: item) },
-                        onWeeklyTap: { startEditingWeekly(for: item) },
+                        monthlyLabel: monthlyAlertLabel(for: item),
+                        eventLabel: eventAlertLabel(for: item),
+                        studyLabel: studyAlertLabel(for: item),
+                        mentalLabel: mentalAlertLabel(for: item),
+                        onYearlyTap: { startEditingYearly(for: item) },
                         onMonthlyTap: { startEditingMonthly(for: item) },
-                        onYearlyTap: { startEditingYearly(for: item) }
+                        onEventTap: { startEditingEvent(for: item) },
+                        onStudyTap: { startEditingStudy(for: item) },
+                        onMentalTap: { startEditingMental(for: item) }
                     )
                 }
                 .onDelete { indexSet in
@@ -304,267 +328,39 @@ struct PromptsView: View {
     }
 
     private func deleteItems(at indexSet: IndexSet, in category: PromptCategory) {
-        func clearRules(for texts: [String]) {
-            texts.forEach { rules[$0] = nil }
-        }
-
         switch category {
         case .daily:
             let texts = indexSet.map { dailyItems[$0].text }
             dailyItems.remove(atOffsets: indexSet)
-            clearRules(for: texts)
+            texts.forEach { rules[$0] = nil }
         case .weekly:
             let texts = indexSet.map { weeklyItems[$0].text }
             weeklyItems.remove(atOffsets: indexSet)
-            clearRules(for: texts)
+            texts.forEach { rules[$0] = nil }
         case .monthly:
             let texts = indexSet.map { monthlyItems[$0].text }
             monthlyItems.remove(atOffsets: indexSet)
-            clearRules(for: texts)
+            texts.forEach { rules[$0] = nil }
         case .yearly:
             let texts = indexSet.map { yearlyItems[$0].text }
             yearlyItems.remove(atOffsets: indexSet)
-            clearRules(for: texts)
+            texts.forEach { rules[$0] = nil }
         case .events:
             let texts = indexSet.map { eventsItems[$0].text }
             eventsItems.remove(atOffsets: indexSet)
-            clearRules(for: texts)
+            texts.forEach { rules[$0] = nil }
         case .study:
             let texts = indexSet.map { studyItems[$0].text }
             studyItems.remove(atOffsets: indexSet)
-            clearRules(for: texts)
+            texts.forEach { rules[$0] = nil }
         case .mentalHealth:
             let texts = indexSet.map { mentalHealthItems[$0].text }
             mentalHealthItems.remove(atOffsets: indexSet)
-            clearRules(for: texts)
+            texts.forEach { rules[$0] = nil }
         }
     }
 
-    // MARK: - DAILY Alert helpers (time-only, 00:00 = non time-specific)
-
-    private func dailyAlertLabel(for item: PromptItem) -> String {
-        let key = item.text
-        guard let rule = rules[key] else {
-            return "Alert"
-        }
-
-        if let h = rule.timeHour, let m = rule.timeMinute {
-            // A real time has been set
-            var comps = DateComponents()
-            comps.hour = h
-            comps.minute = m
-            let cal = Calendar.current
-            let d = cal.date(from: comps) ?? Date()
-            let df = DateFormatter()
-            df.timeStyle = .short
-            return df.string(from: d)
-        } else {
-            // Rule exists but we treat as "non time-specific"
-            return "Any time"
-        }
-    }
-
-    private func startEditingDaily(for item: PromptItem) {
-        let key = item.text
-        editingDailyPromptText = key
-
-        let cal = Calendar.current
-        let now = Date()
-
-        if let rule = rules[key],
-           let h = rule.timeHour,
-           let m = rule.timeMinute,
-           let d = cal.date(bySettingHour: h, minute: m, second: 0, of: now) {
-            dailyTempTime = d
-        } else {
-            // Default to midnight when there is no time,
-            // since 00:00 is our "non time-specific" sentinel.
-            dailyTempTime = cal.date(bySettingHour: 0, minute: 0, second: 0, of: now) ?? now
-        }
-
-        showingDailySheet = true
-    }
-
-    @ViewBuilder
-    private func dailyAlertSheet() -> some View {
-        NavigationStack {
-            Form {
-                Section("Daily time") {
-                    DatePicker("Time",
-                               selection: $dailyTempTime,
-                               displayedComponents: .hourAndMinute)
-                        .datePickerStyle(.wheel)
-
-                    Text("Tip: set the time to 00:00 if you want this prompt to be non time-specific.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle("Daily Alert")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        showingDailySheet = false
-                    }
-                }
-                ToolbarItem(placement: .destructiveAction) {
-                    if let key = editingDailyPromptText, rules[key] != nil {
-                        Button("Clear") {
-                            if let key = editingDailyPromptText {
-                                var rule = rules[key] ?? PromptRule()
-                                rule.timeHour = nil
-                                rule.timeMinute = nil
-                                rules[key] = rule
-                            }
-                            showingDailySheet = false
-                        }
-                    }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        guard let key = editingDailyPromptText else {
-                            showingDailySheet = false
-                            return
-                        }
-                        let cal = Calendar.current
-                        let comps = cal.dateComponents([.hour, .minute], from: dailyTempTime)
-                        var rule = rules[key] ?? PromptRule()
-
-                        // 00:00 is our "no specific time" sentinel
-                        if let h = comps.hour, let m = comps.minute, (h != 0 || m != 0) {
-                            rule.timeHour = h
-                            rule.timeMinute = m
-                        } else {
-                            rule.timeHour = nil
-                            rule.timeMinute = nil
-                        }
-
-                        rules[key] = rule
-                        showingDailySheet = false
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: - WEEKLY Alert helpers
-
-    private func weekdayName(for weekday: Int) -> String {
-        // 1=Sunday ... 7=Saturday (Calendar style)
-        let symbols = Calendar.current.weekdaySymbols
-        guard weekday >= 1, weekday <= symbols.count else { return "Day" }
-        return symbols[weekday - 1]
-    }
-
-    private func weeklyAlertLabel(for item: PromptItem) -> String {
-        let key = item.text
-        guard let rule = rules[key],
-              let wd = rule.weekday else {
-            return "Alert"
-        }
-
-        let name = weekdayName(for: wd)
-        if let h = rule.timeHour, let m = rule.timeMinute {
-            var comps = DateComponents()
-            comps.hour = h
-            comps.minute = m
-            let cal = Calendar.current
-            let d = cal.date(from: comps) ?? Date()
-            let df = DateFormatter()
-            df.timeStyle = .short
-            let timeString = df.string(from: d)
-            return "\(name) \(timeString)"
-        } else {
-            return name
-        }
-    }
-
-    private func startEditingWeekly(for item: PromptItem) {
-        let key = item.text
-        editingWeeklyPromptText = key
-
-        let cal = Calendar.current
-        let now = Date()
-
-        if let rule = rules[key] {
-            weeklyTempWeekday = rule.weekday ?? cal.component(.weekday, from: now)
-
-            if let h = rule.timeHour, let m = rule.timeMinute,
-               let d = cal.date(bySettingHour: h, minute: m, second: 0, of: now) {
-                weeklyTempTime = d
-            } else {
-                weeklyTempTime = now
-            }
-        } else {
-            weeklyTempWeekday = cal.component(.weekday, from: now)
-            weeklyTempTime = now
-        }
-
-        showingWeeklySheet = true
-    }
-
-    @ViewBuilder
-    private func weeklyAlertSheet() -> some View {
-        NavigationStack {
-            Form {
-                Section("Weekly schedule") {
-                    Picker("Day of week", selection: $weeklyTempWeekday) {
-                        ForEach(1...7, id: \.self) { wd in
-                            Text(weekdayName(for: wd)).tag(wd)
-                        }
-                    }
-                    .pickerStyle(.wheel)
-
-                    DatePicker("Time",
-                               selection: $weeklyTempTime,
-                               displayedComponents: .hourAndMinute)
-                        .datePickerStyle(.wheel)
-                }
-            }
-            .navigationTitle("Weekly Alert")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        showingWeeklySheet = false
-                    }
-                }
-                ToolbarItem(placement: .destructiveAction) {
-                    if let key = editingWeeklyPromptText, rules[key] != nil {
-                        Button("Clear") {
-                            if let key = editingWeeklyPromptText {
-                                var rule = rules[key] ?? PromptRule()
-                                rule.weekday = nil
-                                rule.timeHour = nil
-                                rule.timeMinute = nil
-                                rules[key] = rule
-                            }
-                            showingWeeklySheet = false
-                        }
-                    }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        guard let key = editingWeeklyPromptText else {
-                            showingWeeklySheet = false
-                            return
-                        }
-                        let cal = Calendar.current
-                        let comps = cal.dateComponents([.hour, .minute], from: weeklyTempTime)
-                        var rule = rules[key] ?? PromptRule()
-                        rule.weekday = weeklyTempWeekday
-                        rule.timeHour = comps.hour
-                        rule.timeMinute = comps.minute
-                        rules[key] = rule
-                        showingWeeklySheet = false
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: - YEARLY Alert helpers
+    // MARK: - Yearly Alert helpers
 
     private func startEditingYearly(for item: PromptItem) {
         let key = item.text
@@ -675,7 +471,7 @@ struct PromptsView: View {
         }
     }
 
-    // MARK: - MONTHLY Alert helpers
+    // MARK: - Monthly Alert helpers
 
     private func startEditingMonthly(for item: PromptItem) {
         let key = item.text
@@ -785,6 +581,351 @@ struct PromptsView: View {
         }
     }
 
+    // MARK: - Events (one-off) Alert helpers
+
+    private func startEditingEvent(for item: PromptItem) {
+        let key = item.text
+        editingEventPromptText = key
+        let rule = rules[key]
+        let cal = Calendar.current
+
+        if let rule, let baseDate = rule.date {
+            if let h = rule.timeHour, let m = rule.timeMinute,
+               let combined = cal.date(bySettingHour: h, minute: m, second: 0, of: baseDate) {
+                eventTempDate = combined
+            } else {
+                eventTempDate = baseDate
+            }
+        } else {
+            eventTempDate = Date().addingTimeInterval(3600)
+        }
+
+        showingEventSheet = true
+    }
+
+    private func eventAlertLabel(for item: PromptItem) -> String {
+        let key = item.text
+        guard let rule = rules[key],
+              let baseDate = rule.date else {
+            return "Alert"
+        }
+
+        let cal = Calendar.current
+        let dateToShow: Date
+        if let h = rule.timeHour, let m = rule.timeMinute,
+           let combined = cal.date(bySettingHour: h, minute: m, second: 0, of: baseDate) {
+            dateToShow = combined
+        } else {
+            dateToShow = baseDate
+        }
+
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        return df.string(from: dateToShow)
+    }
+
+    @ViewBuilder
+    private func eventAlertSheet() -> some View {
+        NavigationStack {
+            Form {
+                Section("Event date & time") {
+                    DatePicker(
+                        "Event time",
+                        selection: $eventTempDate,
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                    .datePickerStyle(.wheel)
+                }
+
+                Section {
+                    Text("This event will be treated as a one-off and can be auto-removed after the date has passed.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Event Alert")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        showingEventSheet = false
+                    }
+                }
+                ToolbarItem(placement: .destructiveAction) {
+                    if let key = editingEventPromptText, rules[key] != nil {
+                        Button("Clear") {
+                            if let key = editingEventPromptText {
+                                var rule = rules[key] ?? PromptRule()
+                                rule.date = nil
+                                rule.timeHour = nil
+                                rule.timeMinute = nil
+                                rule.oneOff = nil
+                                rules[key] = rule
+                            }
+                            showingEventSheet = false
+                        }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        guard let key = editingEventPromptText else {
+                            showingEventSheet = false
+                            return
+                        }
+
+                        let cal = Calendar.current
+                        let comps = cal.dateComponents(
+                            [.year, .month, .day, .hour, .minute],
+                            from: eventTempDate
+                        )
+
+                        var rule = rules[key] ?? PromptRule()
+                        if let y = comps.year, let m = comps.month, let d = comps.day {
+                            rule.date = cal.date(from: DateComponents(year: y, month: m, day: d))
+                        }
+                        rule.timeHour = comps.hour
+                        rule.timeMinute = comps.minute
+                        rule.oneOff = true
+
+                        rules[key] = rule
+                        showingEventSheet = false
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Study (one-off) Alert helpers
+
+    private func startEditingStudy(for item: PromptItem) {
+        let key = item.text
+        editingStudyPromptText = key
+        let rule = rules[key]
+        let cal = Calendar.current
+
+        if let rule, let baseDate = rule.date {
+            if let h = rule.timeHour, let m = rule.timeMinute,
+               let combined = cal.date(bySettingHour: h, minute: m, second: 0, of: baseDate) {
+                studyTempDate = combined
+            } else {
+                studyTempDate = baseDate
+            }
+        } else {
+            studyTempDate = Date().addingTimeInterval(3600)
+        }
+
+        showingStudySheet = true
+    }
+
+    private func studyAlertLabel(for item: PromptItem) -> String {
+        let key = item.text
+        guard let rule = rules[key],
+              let baseDate = rule.date else {
+            return "Alert"
+        }
+
+        let cal = Calendar.current
+        let dateToShow: Date
+        if let h = rule.timeHour, let m = rule.timeMinute,
+           let combined = cal.date(bySettingHour: h, minute: m, second: 0, of: baseDate) {
+            dateToShow = combined
+        } else {
+            dateToShow = baseDate
+        }
+
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        return df.string(from: dateToShow)
+    }
+
+    @ViewBuilder
+    private func studyAlertSheet() -> some View {
+        NavigationStack {
+            Form {
+                Section("Study reminder date & time") {
+                    DatePicker(
+                        "Study time",
+                        selection: $studyTempDate,
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                    .datePickerStyle(.wheel)
+                }
+
+                Section {
+                    Text("This study reminder will be treated as a one-off and can be auto-removed after the date has passed.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Study Alert")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        showingStudySheet = false
+                    }
+                }
+                ToolbarItem(placement: .destructiveAction) {
+                    if let key = editingStudyPromptText, rules[key] != nil {
+                        Button("Clear") {
+                            if let key = editingStudyPromptText {
+                                var rule = rules[key] ?? PromptRule()
+                                rule.date = nil
+                                rule.timeHour = nil
+                                rule.timeMinute = nil
+                                rule.oneOff = nil
+                                rules[key] = rule
+                            }
+                            showingStudySheet = false
+                        }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        guard let key = editingStudyPromptText else {
+                            showingStudySheet = false
+                            return
+                        }
+
+                        let cal = Calendar.current
+                        let comps = cal.dateComponents(
+                            [.year, .month, .day, .hour, .minute],
+                            from: studyTempDate
+                        )
+
+                        var rule = rules[key] ?? PromptRule()
+                        if let y = comps.year, let m = comps.month, let d = comps.day {
+                            rule.date = cal.date(from: DateComponents(year: y, month: m, day: d))
+                        }
+                        rule.timeHour = comps.hour
+                        rule.timeMinute = comps.minute
+                        rule.oneOff = true
+
+                        rules[key] = rule
+                        showingStudySheet = false
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Mental Health (one-off) Alert helpers
+
+    private func startEditingMental(for item: PromptItem) {
+        let key = item.text
+        editingMentalPromptText = key
+        let rule = rules[key]
+        let cal = Calendar.current
+
+        if let rule, let baseDate = rule.date {
+            if let h = rule.timeHour, let m = rule.timeMinute,
+               let combined = cal.date(bySettingHour: h, minute: m, second: 0, of: baseDate) {
+                mentalTempDate = combined
+            } else {
+                mentalTempDate = baseDate
+            }
+        } else {
+            mentalTempDate = Date().addingTimeInterval(3600)
+        }
+
+        showingMentalSheet = true
+    }
+
+    private func mentalAlertLabel(for item: PromptItem) -> String {
+        let key = item.text
+        guard let rule = rules[key],
+              let baseDate = rule.date else {
+            return "Alert"
+        }
+
+        let cal = Calendar.current
+        let dateToShow: Date
+        if let h = rule.timeHour, let m = rule.timeMinute,
+           let combined = cal.date(bySettingHour: h, minute: m, second: 0, of: baseDate) {
+            dateToShow = combined
+        } else {
+            dateToShow = baseDate
+        }
+
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        return df.string(from: dateToShow)
+    }
+
+    @ViewBuilder
+    private func mentalAlertSheet() -> some View {
+        NavigationStack {
+            Form {
+                Section("Mental health reminder date & time") {
+                    DatePicker(
+                        "Reminder time",
+                        selection: $mentalTempDate,
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                    .datePickerStyle(.wheel)
+                }
+
+                Section {
+                    Text("This reminder will be treated as a one-off and can be auto-removed after the date has passed.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Mental Health Alert")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        showingMentalSheet = false
+                    }
+                }
+                ToolbarItem(placement: .destructiveAction) {
+                    if let key = editingMentalPromptText, rules[key] != nil {
+                        Button("Clear") {
+                            if let key = editingMentalPromptText {
+                                var rule = rules[key] ?? PromptRule()
+                                rule.date = nil
+                                rule.timeHour = nil
+                                rule.timeMinute = nil
+                                rule.oneOff = nil
+                                rules[key] = rule
+                            }
+                            showingMentalSheet = false
+                        }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        guard let key = editingMentalPromptText else {
+                            showingMentalSheet = false
+                            return
+                        }
+
+                        let cal = Calendar.current
+                        let comps = cal.dateComponents(
+                            [.year, .month, .day, .hour, .minute],
+                            from: mentalTempDate
+                        )
+
+                        var rule = rules[key] ?? PromptRule()
+                        if let y = comps.year, let m = comps.month, let d = comps.day {
+                            rule.date = cal.date(from: DateComponents(year: y, month: m, day: d))
+                        }
+                        rule.timeHour = comps.hour
+                        rule.timeMinute = comps.minute
+                        rule.oneOff = true
+
+                        rules[key] = rule
+                        showingMentalSheet = false
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Persistence
 
     private struct PromptsState: Codable {
@@ -875,13 +1016,11 @@ struct PromptsView: View {
         case .weekly:       return "e.g. Team stand-up Monday 9am"
         case .monthly:      return "e.g. Dog worming tablets"
         case .yearly:       return "e.g. Mum's birthday"
-        case .events:       return "e.g. School concert"
+        case .events:       return "e.g. Pia singing concert"
         case .study:        return "e.g. Read chapter 3"
         case .mentalHealth: return "e.g. 10-min walk / breathe"
         }
     }
 }
 
-#Preview {
-    PromptsView()
-}
+#Preview { PromptsView() }
