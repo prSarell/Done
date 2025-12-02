@@ -127,7 +127,7 @@ struct PromptsView: View {
         .navigationTitle("Prompts")
         .toolbar { EditButton() }
         .task {
-            await loadFromDisk()
+            loadFromDisk()
             loadRules()
         }
         // Save prompts when any category changes
@@ -668,7 +668,6 @@ struct PromptsView: View {
             self.mentalHealthItems = decodeItems(for: .mentalHealthItems)
         }
 
-        // Explicit encoder so Codable stays happy
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(dailyItems,        forKey: .dailyItems)
@@ -690,55 +689,54 @@ struct PromptsView: View {
         PromptRulesStore.save(rules)
     }
 
-    private func loadFromDisk() async {
-        await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .utility).async {
-                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                let url = docs.appendingPathComponent("prompts.json")
+    private func loadFromDisk() {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = docs.appendingPathComponent("prompts.json")
+
+        #if DEBUG
+        print("📂 PromptsView: Loading prompts from \(url.path)")
+        #endif
+
+        DispatchQueue.global(qos: .utility).async {
+            var loaded = PromptsState()
+
+            do {
+                guard FileManager.default.fileExists(atPath: url.path) else {
+                    #if DEBUG
+                    print("📂 PromptsView: No prompts.json file yet, starting empty")
+                    #endif
+                    throw NSError(domain: "PromptsView", code: 1, userInfo: nil)
+                }
+
+                let data = try Data(contentsOf: url)
 
                 #if DEBUG
-                print("📂 PromptsView: Loading prompts from \(url.path)")
+                print("📂 PromptsView: Read \(data.count) bytes from prompts.json")
                 #endif
 
-                var loaded = PromptsState()
+                let dec = JSONDecoder()
+                dec.dateDecodingStrategy = .iso8601
+                loaded = try dec.decode(PromptsState.self, from: data)
 
-                do {
-                    guard FileManager.default.fileExists(atPath: url.path) else {
-                        #if DEBUG
-                        print("📂 PromptsView: No prompts.json file yet, starting empty")
-                        #endif
-                        throw NSError(domain: "PromptsView", code: 1, userInfo: nil)
-                    }
+                #if DEBUG
+                print("📦 PromptsView: Decoded prompts - daily=\(loaded.dailyItems.count), weekly=\(loaded.weeklyItems.count), work=\(loaded.workItems.count)")
+                #endif
 
-                    let data = try Data(contentsOf: url)
-                    #if DEBUG
-                    print("📂 PromptsView: Read \(data.count) bytes from prompts.json")
-                    #endif
+            } catch {
+                #if DEBUG
+                print("❌ PromptsView: Failed to load prompts.json:", error)
+                #endif
+            }
 
-                    let dec = JSONDecoder()
-                    dec.dateDecodingStrategy = .iso8601
-                    loaded = try dec.decode(PromptsState.self, from: data)
-
-                    #if DEBUG
-                    print("📦 PromptsView: Decoded prompts: daily=\(loaded.dailyItems.count), weekly=\(loaded.weeklyItems.count), work=\(loaded.workItems.count)")
-                    #endif
-                } catch {
-                    #if DEBUG
-                    print("❌ PromptsView: Failed to load prompts.json:", error)
-                    #endif
-                }
-
-                DispatchQueue.main.async {
-                    self.dailyItems        = loaded.dailyItems
-                    self.weeklyItems       = loaded.weeklyItems
-                    self.workItems         = loaded.workItems
-                    self.monthlyItems      = loaded.monthlyItems
-                    self.yearlyItems       = loaded.yearlyItems
-                    self.eventsItems       = loaded.eventsItems
-                    self.studyItems        = loaded.studyItems
-                    self.mentalHealthItems = loaded.mentalHealthItems
-                    cont.resume()
-                }
+            DispatchQueue.main.async {
+                self.dailyItems        = loaded.dailyItems
+                self.weeklyItems       = loaded.weeklyItems
+                self.workItems         = loaded.workItems
+                self.monthlyItems      = loaded.monthlyItems
+                self.yearlyItems       = loaded.yearlyItems
+                self.eventsItems       = loaded.eventsItems
+                self.studyItems        = loaded.studyItems
+                self.mentalHealthItems = loaded.mentalHealthItems
             }
         }
     }
@@ -759,6 +757,7 @@ struct PromptsView: View {
         let enc = JSONEncoder()
         enc.outputFormatting = [.withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
+
         do {
             let data = try enc.encode(state)
             try data.write(to: url, options: .atomic)
