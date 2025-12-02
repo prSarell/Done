@@ -61,12 +61,16 @@ private struct PromptRow: View {
     let eventLabel: String
     let studyLabel: String
     let mentalLabel: String
+    let dailyLabel: String
+    let weeklyLabel: String
 
     let onYearlyTap: () -> Void
     let onMonthlyTap: () -> Void
     let onEventTap: () -> Void
     let onStudyTap: () -> Void
     let onMentalTap: () -> Void
+    let onDailyTap: () -> Void
+    let onWeeklyTap: () -> Void
 
     var body: some View {
         HStack {
@@ -75,6 +79,32 @@ private struct PromptRow: View {
             Spacer()
 
             switch category {
+            case .daily:
+                Button(action: onDailyTap) {
+                    Text(dailyLabel)
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .stroke(Color.accentColor, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+
+            case .weekly:
+                Button(action: onWeeklyTap) {
+                    Text(weeklyLabel)
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .stroke(Color.accentColor, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+
             case .yearly:
                 Button(action: onYearlyTap) {
                     Text(yearlyLabel)
@@ -139,9 +169,6 @@ private struct PromptRow: View {
                         )
                 }
                 .buttonStyle(.plain)
-
-            default:
-                EmptyView()
             }
         }
     }
@@ -164,6 +191,17 @@ struct PromptsView: View {
 
     // Rules (keyed by prompt text to match PromptRulesStore)
     @State private var rules: [String: PromptRule] = [:]
+
+    // Daily alert editing (time only, repeats every day)
+    @State private var editingDailyPromptText: String?
+    @State private var showingDailySheet = false
+    @State private var dailyTempTime: Date = Date().addingTimeInterval(3600)
+
+    // Weekly alert editing (weekday + time)
+    @State private var editingWeeklyPromptText: String?
+    @State private var showingWeeklySheet = false
+    @State private var weeklyTempWeekday: Int = 2 // default Monday
+    @State private var weeklyTempTime: Date = Date().addingTimeInterval(3600)
 
     // Yearly alert editing
     @State private var editingYearlyPromptText: String?
@@ -235,6 +273,14 @@ struct PromptsView: View {
             .onChange(of: mentalHealthItems) { _, _ in saveToDisk() }
             // Save rules when changed
             .onChange(of: rules) { _, _ in saveRules() }
+            // Daily editor sheet
+            .sheet(isPresented: $showingDailySheet) {
+                dailyAlertSheet()
+            }
+            // Weekly editor sheet
+            .sheet(isPresented: $showingWeeklySheet) {
+                weeklyAlertSheet()
+            }
             // Yearly editor sheet
             .sheet(isPresented: $showingYearlySheet) {
                 yearlyAlertSheet()
@@ -290,11 +336,15 @@ struct PromptsView: View {
                         eventLabel: eventAlertLabel(for: item),
                         studyLabel: studyAlertLabel(for: item),
                         mentalLabel: mentalAlertLabel(for: item),
+                        dailyLabel: dailyAlertLabel(for: item),
+                        weeklyLabel: weeklyAlertLabel(for: item),
                         onYearlyTap: { startEditingYearly(for: item) },
                         onMonthlyTap: { startEditingMonthly(for: item) },
                         onEventTap: { startEditingEvent(for: item) },
                         onStudyTap: { startEditingStudy(for: item) },
-                        onMentalTap: { startEditingMental(for: item) }
+                        onMentalTap: { startEditingMental(for: item) },
+                        onDailyTap: { startEditingDaily(for: item) },
+                        onWeeklyTap: { startEditingWeekly(for: item) }
                     )
                 }
                 .onDelete { indexSet in
@@ -357,6 +407,227 @@ struct PromptsView: View {
             let texts = indexSet.map { mentalHealthItems[$0].text }
             mentalHealthItems.remove(atOffsets: indexSet)
             texts.forEach { rules[$0] = nil }
+        }
+    }
+
+    // MARK: - Daily Alert helpers (time only, every day)
+
+    private func startEditingDaily(for item: PromptItem) {
+        let key = item.text
+        editingDailyPromptText = key
+        let rule = rules[key]
+        let cal = Calendar.current
+
+        if let rule, let h = rule.timeHour, let m = rule.timeMinute {
+            let now = Date()
+            dailyTempTime = cal.date(bySettingHour: h, minute: m, second: 0, of: now) ?? now
+        } else {
+            dailyTempTime = Date().addingTimeInterval(3600)
+        }
+
+        showingDailySheet = true
+    }
+
+    private func dailyAlertLabel(for item: PromptItem) -> String {
+        let key = item.text
+        guard let rule = rules[key],
+              let h = rule.timeHour,
+              let m = rule.timeMinute else {
+            return "Alert"
+        }
+
+        let cal = Calendar.current
+        let now = Date()
+        let date = cal.date(bySettingHour: h, minute: m, second: 0, of: now) ?? now
+
+        let df = DateFormatter()
+        df.timeStyle = .short
+        df.dateStyle = .none
+        return df.string(from: date)
+    }
+
+    @ViewBuilder
+    private func dailyAlertSheet() -> some View {
+        NavigationStack {
+            Form {
+                Section("Time (repeats every day)") {
+                    DatePicker(
+                        "Time",
+                        selection: $dailyTempTime,
+                        displayedComponents: [.hourAndMinute]
+                    )
+                    .datePickerStyle(.wheel)
+                }
+            }
+            .navigationTitle("Daily Alert")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        showingDailySheet = false
+                    }
+                }
+                ToolbarItem(placement: .destructiveAction) {
+                    if let key = editingDailyPromptText, rules[key] != nil {
+                        Button("Clear") {
+                            if let key = editingDailyPromptText {
+                                var rule = rules[key] ?? PromptRule()
+                                rule.timeHour = nil
+                                rule.timeMinute = nil
+                                rules[key] = rule
+                            }
+                            showingDailySheet = false
+                        }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        guard let key = editingDailyPromptText else {
+                            showingDailySheet = false
+                            return
+                        }
+
+                        let cal = Calendar.current
+                        let comps = cal.dateComponents([.hour, .minute], from: dailyTempTime)
+
+                        var rule = rules[key] ?? PromptRule()
+                        rule.timeHour = comps.hour
+                        rule.timeMinute = comps.minute
+                        // daily: no specific weekday or date restriction
+                        rule.weekday = nil
+                        rule.date = nil
+
+                        rules[key] = rule
+                        showingDailySheet = false
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Weekly Alert helpers (weekday + time)
+
+    private func weekdayName(for weekday: Int) -> String {
+        let symbols = Calendar.current.shortWeekdaySymbols // usually Sun…Sat
+        guard weekday >= 1, weekday <= symbols.count else { return "Day" }
+        return symbols[weekday - 1]
+    }
+
+    private func startEditingWeekly(for item: PromptItem) {
+        let key = item.text
+        editingWeeklyPromptText = key
+        let rule = rules[key]
+        let cal = Calendar.current
+
+        if let rule {
+            if let wd = rule.weekday {
+                weeklyTempWeekday = wd
+            } else {
+                weeklyTempWeekday = cal.component(.weekday, from: Date())
+            }
+
+            if let h = rule.timeHour, let m = rule.timeMinute {
+                let now = Date()
+                weeklyTempTime = cal.date(bySettingHour: h, minute: m, second: 0, of: now) ?? now
+            } else {
+                weeklyTempTime = Date().addingTimeInterval(3600)
+            }
+        } else {
+            weeklyTempWeekday = cal.component(.weekday, from: Date())
+            weeklyTempTime = Date().addingTimeInterval(3600)
+        }
+
+        showingWeeklySheet = true
+    }
+
+    private func weeklyAlertLabel(for item: PromptItem) -> String {
+        let key = item.text
+        guard let rule = rules[key],
+              let wd = rule.weekday else {
+            return "Alert"
+        }
+
+        let dayName = weekdayName(for: wd)
+
+        if let h = rule.timeHour, let m = rule.timeMinute {
+            let cal = Calendar.current
+            let now = Date()
+            let date = cal.date(bySettingHour: h, minute: m, second: 0, of: now) ?? now
+
+            let df = DateFormatter()
+            df.timeStyle = .short
+            df.dateStyle = .none
+            let timeString = df.string(from: date)
+            return "\(dayName) \(timeString)"
+        } else {
+            return dayName
+        }
+    }
+
+    @ViewBuilder
+    private func weeklyAlertSheet() -> some View {
+        NavigationStack {
+            Form {
+                Section("Day & time (repeats weekly)") {
+                    Picker("Day of week", selection: $weeklyTempWeekday) {
+                        ForEach(1...7, id: \.self) { wd in
+                            Text(weekdayName(for: wd)).tag(wd)
+                        }
+                    }
+                    .pickerStyle(.wheel)
+
+                    DatePicker(
+                        "Time",
+                        selection: $weeklyTempTime,
+                        displayedComponents: [.hourAndMinute]
+                    )
+                    .datePickerStyle(.wheel)
+                }
+            }
+            .navigationTitle("Weekly Alert")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        showingWeeklySheet = false
+                    }
+                }
+                ToolbarItem(placement: .destructiveAction) {
+                    if let key = editingWeeklyPromptText, rules[key] != nil {
+                        Button("Clear") {
+                            if let key = editingWeeklyPromptText {
+                                var rule = rules[key] ?? PromptRule()
+                                rule.weekday = nil
+                                rule.timeHour = nil
+                                rule.timeMinute = nil
+                                rules[key] = rule
+                            }
+                            showingWeeklySheet = false
+                        }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        guard let key = editingWeeklyPromptText else {
+                            showingWeeklySheet = false
+                            return
+                        }
+
+                        let cal = Calendar.current
+                        let comps = cal.dateComponents([.hour, .minute], from: weeklyTempTime)
+
+                        var rule = rules[key] ?? PromptRule()
+                        rule.weekday = weeklyTempWeekday
+                        rule.timeHour = comps.hour
+                        rule.timeMinute = comps.minute
+                        // weekly: no specific absolute date; uses weekday + time
+                        rule.date = nil
+
+                        rules[key] = rule
+                        showingWeeklySheet = false
+                    }
+                }
+            }
         }
     }
 
@@ -1012,13 +1283,13 @@ struct PromptsView: View {
 
     private var placeholderText: String {
         switch selectedCategory {
-        case .daily:        return "e.g. Get Milk"
-        case .weekly:       return "e.g. Team stand-up Monday 9am"
-        case .monthly:      return "e.g. Dog worming tablets"
-        case .yearly:       return "e.g. Mum's birthday"
-        case .events:       return "e.g. Pia singing concert"
-        case .study:        return "e.g. Read chapter 3"
-        case .mentalHealth: return "e.g. 10-min walk / breathe"
+            case .daily:        return "e.g. Get Milk"
+            case .weekly:       return "e.g. Team stand-up Monday 9am"
+            case .monthly:      return "e.g. Dog worming tablets"
+            case .yearly:       return "e.g. Mum's birthday"
+            case .events:       return "e.g. Pia singing concert"
+            case .study:        return "e.g. Read chapter 3"
+            case .mentalHealth: return "e.g. 10-min walk / breathe"
         }
     }
 }

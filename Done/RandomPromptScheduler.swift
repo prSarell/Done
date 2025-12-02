@@ -104,7 +104,7 @@ final class RandomPromptScheduler {
         var pool = candidates
         pool.shuffle(using: &rng)
 
-        // NEW: load per-prompt temporal rules once (Step 3)
+        // load per-prompt temporal rules once
         let perPromptRules = PromptRulesStore.load()
 
         var scheduledIDs: [String] = []
@@ -112,7 +112,7 @@ final class RandomPromptScheduler {
         var scheduledCount = 0
 
         for (i, time) in times.enumerated() {
-            // NEW: filter eligible prompts *for this exact fire time* by rules
+            // filter eligible prompts *for this exact fire time* by rules
             let eligible = PromptSelector.eligible(from: pool, rules: perPromptRules, at: time, cal: cal)
 
             // Pick next avoiding immediate duplicate; if no eligible, skip this slot
@@ -123,11 +123,9 @@ final class RandomPromptScheduler {
             lastText = next.text
 
             let id = notifID(for: next.id, on: time, index: i)
-            // Keep your existing NotificationsManager signature (no breaking change)
             NotificationsManager.shared.scheduleOneOff(id: id, title: next.text, at: time)
             scheduledIDs.append(id)
 
-            // Record last-shown at plan time (coarse; could also store 'time')
             history.lastShown[next.id] = now
             scheduledCount += 1
         }
