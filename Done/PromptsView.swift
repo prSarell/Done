@@ -14,6 +14,7 @@ struct PromptItem: Identifiable, Hashable, Codable {
 enum PromptCategory: String, CaseIterable, Identifiable, Codable {
     case daily = "Daily"
     case weekly = "Weekly"
+    case work = "Work"
     case monthly = "Monthly"
     case yearly = "Yearly"
     case events = "Events"
@@ -84,6 +85,7 @@ struct PromptsView: View {
     // Separate lists per category
     @State private var dailyItems:        [PromptItem] = []
     @State private var weeklyItems:       [PromptItem] = []
+    @State private var workItems:         [PromptItem] = []
     @State private var monthlyItems:      [PromptItem] = []
     @State private var yearlyItems:       [PromptItem] = []
     @State private var eventsItems:       [PromptItem] = []
@@ -108,54 +110,107 @@ struct PromptsView: View {
     @State private var alertDate: Date = Date()
     @State private var alertTime: Date = Date().addingTimeInterval(3600)
 
-    // Grid layout for two visible rows (4 on first row, remaining wrap to second)
-    private let tabColumns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
+    // MARK: - Body split into small pieces
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 12) {
+            content
+        }
+    }
 
-                // ---- Two-line tab grid ----
-                let categories = PromptCategory.allCases
-                LazyVGrid(columns: tabColumns, alignment: .center, spacing: 8) {
-                    ForEach(categories, id: \.self) { cat in
-                        CategoryTabButton(
-                            category: cat,
-                            isSelected: selectedCategory == cat,
-                            action: { selectedCategory = cat }
-                        )
-                    }
-                }
-                .padding(.horizontal)
+    @ViewBuilder
+    private var content: some View {
+        VStack(spacing: 12) {
+            tabsHeader
+            promptsList
+        }
+        .navigationTitle("Prompts")
+        .toolbar { EditButton() }
+        .task {
+            await loadFromDisk()
+            loadRules()
+        }
+        // Save prompts when any category changes
+        .onChange(of: dailyItems)        { _, _ in saveToDisk() }
+        .onChange(of: weeklyItems)       { _, _ in saveToDisk() }
+        .onChange(of: workItems)         { _, _ in saveToDisk() }
+        .onChange(of: monthlyItems)      { _, _ in saveToDisk() }
+        .onChange(of: yearlyItems)       { _, _ in saveToDisk() }
+        .onChange(of: eventsItems)       { _, _ in saveToDisk() }
+        .onChange(of: studyItems)        { _, _ in saveToDisk() }
+        .onChange(of: mentalHealthItems) { _, _ in saveToDisk() }
+        // Save rules when changed
+        .onChange(of: rules) { _, _ in saveRules() }
+        // Unified Alert editor sheet
+        .sheet(isPresented: $showingAlertSheet) {
+            alertEditorSheet()
+        }
+    }
 
-                List {
-                    addSection
+    // MARK: - Header + List split out
 
-                    listSection
-                }
-                .listStyle(.insetGrouped)
+    @ViewBuilder
+    private var tabsHeader: some View {
+        VStack(spacing: 8) {
+
+            // Row 1: Daily · Weekly · Monthly · Yearly
+            HStack(spacing: 8) {
+                CategoryTabButton(
+                    category: .daily,
+                    isSelected: selectedCategory == .daily,
+                    action: { selectedCategory = .daily }
+                )
+                CategoryTabButton(
+                    category: .weekly,
+                    isSelected: selectedCategory == .weekly,
+                    action: { selectedCategory = .weekly }
+                )
+                CategoryTabButton(
+                    category: .monthly,
+                    isSelected: selectedCategory == .monthly,
+                    action: { selectedCategory = .monthly }
+                )
+                CategoryTabButton(
+                    category: .yearly,
+                    isSelected: selectedCategory == .yearly,
+                    action: { selectedCategory = .yearly }
+                )
             }
-            .navigationTitle("Prompts")
-            .toolbar { EditButton() }
-            .task {
-                await loadFromDisk()
-                loadRules()
-            }
-            // Save prompts when any category changes (iOS 17-style onChange)
-            .onChange(of: dailyItems)        { _, _ in saveToDisk() }
-            .onChange(of: weeklyItems)       { _, _ in saveToDisk() }
-            .onChange(of: monthlyItems)      { _, _ in saveToDisk() }
-            .onChange(of: yearlyItems)       { _, _ in saveToDisk() }
-            .onChange(of: eventsItems)       { _, _ in saveToDisk() }
-            .onChange(of: studyItems)        { _, _ in saveToDisk() }
-            .onChange(of: mentalHealthItems) { _, _ in saveToDisk() }
-            // Save rules when changed
-            .onChange(of: rules) { _, _ in saveRules() }
-            // Unified Alert editor sheet
-            .sheet(isPresented: $showingAlertSheet) {
-                alertEditorSheet()
+
+            // Row 2: Events · Study · Health · Work
+            HStack(spacing: 8) {
+                CategoryTabButton(
+                    category: .events,
+                    isSelected: selectedCategory == .events,
+                    action: { selectedCategory = .events }
+                )
+                CategoryTabButton(
+                    category: .study,
+                    isSelected: selectedCategory == .study,
+                    action: { selectedCategory = .study }
+                )
+                CategoryTabButton(
+                    category: .mentalHealth,
+                    isSelected: selectedCategory == .mentalHealth,
+                    action: { selectedCategory = .mentalHealth }
+                )
+                CategoryTabButton(
+                    category: .work,
+                    isSelected: selectedCategory == .work,
+                    action: { selectedCategory = .work }
+                )
             }
         }
+        .padding(.horizontal)
+    }
+
+    @ViewBuilder
+    private var promptsList: some View {
+        List {
+            addSection
+            listSection(for: selectedCategory)
+        }
+        .listStyle(.insetGrouped)
     }
 
     // MARK: - Sections broken out
@@ -172,16 +227,41 @@ struct PromptsView: View {
         }
     }
 
-    private var listSection: some View {
-        Section("\(selectedCategory.rawValue) List") {
-            let binding = itemsBinding(for: selectedCategory)
-            let itemsToShow = binding.wrappedValue
+    // Make the list section very simple for the compiler
+    @ViewBuilder
+    private func listSection(for category: PromptCategory) -> some View {
+        switch category {
+        case .daily:
+            promptsListSection(title: "Daily List", items: dailyItems, category: .daily)
+        case .weekly:
+            promptsListSection(title: "Weekly List", items: weeklyItems, category: .weekly)
+        case .work:
+            promptsListSection(title: "Work List", items: workItems, category: .work)
+        case .monthly:
+            promptsListSection(title: "Monthly List", items: monthlyItems, category: .monthly)
+        case .yearly:
+            promptsListSection(title: "Yearly List", items: yearlyItems, category: .yearly)
+        case .events:
+            promptsListSection(title: "Events List", items: eventsItems, category: .events)
+        case .study:
+            promptsListSection(title: "Study List", items: studyItems, category: .study)
+        case .mentalHealth:
+            promptsListSection(title: "Health List", items: mentalHealthItems, category: .mentalHealth)
+        }
+    }
 
-            if itemsToShow.isEmpty {
+    @ViewBuilder
+    private func promptsListSection(
+        title: String,
+        items: [PromptItem],
+        category: PromptCategory
+    ) -> some View {
+        Section(title) {
+            if items.isEmpty {
                 Text("No items yet. Add one above.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(itemsToShow) { item in
+                ForEach(items, id: \.id) { item in
                     PromptRow(
                         item: item,
                         alertLabel: alertLabel(for: item),
@@ -189,7 +269,7 @@ struct PromptsView: View {
                     )
                 }
                 .onDelete { indexSet in
-                    deleteItems(at: indexSet, in: selectedCategory)
+                    deleteItems(at: indexSet, in: category)
                 }
             }
         }
@@ -208,6 +288,7 @@ struct PromptsView: View {
         switch selectedCategory {
         case .daily:        dailyItems.append(newItem)
         case .weekly:       weeklyItems.append(newItem)
+        case .work:         workItems.append(newItem)
         case .monthly:      monthlyItems.append(newItem)
         case .yearly:       yearlyItems.append(newItem)
         case .events:       eventsItems.append(newItem)
@@ -224,26 +305,37 @@ struct PromptsView: View {
             let texts = indexSet.map { dailyItems[$0].text }
             dailyItems.remove(atOffsets: indexSet)
             texts.forEach { rules[$0] = nil }
+
         case .weekly:
             let texts = indexSet.map { weeklyItems[$0].text }
             weeklyItems.remove(atOffsets: indexSet)
             texts.forEach { rules[$0] = nil }
+
+        case .work:
+            let texts = indexSet.map { workItems[$0].text }
+            workItems.remove(atOffsets: indexSet)
+            texts.forEach { rules[$0] = nil }
+
         case .monthly:
             let texts = indexSet.map { monthlyItems[$0].text }
             monthlyItems.remove(atOffsets: indexSet)
             texts.forEach { rules[$0] = nil }
+
         case .yearly:
             let texts = indexSet.map { yearlyItems[$0].text }
             yearlyItems.remove(atOffsets: indexSet)
             texts.forEach { rules[$0] = nil }
+
         case .events:
             let texts = indexSet.map { eventsItems[$0].text }
             eventsItems.remove(atOffsets: indexSet)
             texts.forEach { rules[$0] = nil }
+
         case .study:
             let texts = indexSet.map { studyItems[$0].text }
             studyItems.remove(atOffsets: indexSet)
             texts.forEach { rules[$0] = nil }
+
         case .mentalHealth:
             let texts = indexSet.map { mentalHealthItems[$0].text }
             mentalHealthItems.remove(atOffsets: indexSet)
@@ -325,7 +417,7 @@ struct PromptsView: View {
         dfTime.dateStyle = .none
         dfTime.timeStyle = .short
 
-        // Prefer Date when both Date + Day are set (your "ignore conflict" rule)
+        // Prefer Date when both Date + Day are set
         if let date = rule.date {
             // Compose a date at the stored time if present, otherwise use date-only
             var dateToShow = date
@@ -519,6 +611,7 @@ struct PromptsView: View {
     private struct PromptsState: Codable {
         var dailyItems:        [PromptItem] = []
         var weeklyItems:       [PromptItem] = []
+        var workItems:         [PromptItem] = []
         var monthlyItems:      [PromptItem] = []
         var yearlyItems:       [PromptItem] = []
         var eventsItems:       [PromptItem] = []
@@ -549,6 +642,7 @@ struct PromptsView: View {
                 DispatchQueue.main.async {
                     self.dailyItems        = loaded.dailyItems
                     self.weeklyItems       = loaded.weeklyItems
+                    self.workItems         = loaded.workItems
                     self.monthlyItems      = loaded.monthlyItems
                     self.yearlyItems       = loaded.yearlyItems
                     self.eventsItems       = loaded.eventsItems
@@ -564,6 +658,7 @@ struct PromptsView: View {
         let state = PromptsState(
             dailyItems:        dailyItems,
             weeklyItems:       weeklyItems,
+            workItems:         workItems,
             monthlyItems:      monthlyItems,
             yearlyItems:       yearlyItems,
             eventsItems:       eventsItems,
@@ -582,18 +677,6 @@ struct PromptsView: View {
 
     // MARK: - Helpers
 
-    private func itemsBinding(for category: PromptCategory) -> Binding<[PromptItem]> {
-        switch category {
-        case .daily:        return $dailyItems
-        case .weekly:       return $weeklyItems
-        case .monthly:      return $monthlyItems
-        case .yearly:       return $yearlyItems
-        case .events:       return $eventsItems
-        case .study:        return $studyItems
-        case .mentalHealth: return $mentalHealthItems
-        }
-    }
-
     private var draftTextTrimmed: String {
         draftText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -601,7 +684,8 @@ struct PromptsView: View {
     private var placeholderText: String {
         switch selectedCategory {
         case .daily:        return "e.g. Get Milk"
-        case .weekly:       return "e.g. Team stand-up Monday 9am"
+        case .weekly:       return "e.g. Weekly review"
+        case .work:         return "e.g. Check-in with producer"
         case .monthly:      return "e.g. Dog worming tablets"
         case .yearly:       return "e.g. Mum's birthday"
         case .events:       return "e.g. Pia singing concert"
