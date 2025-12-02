@@ -609,14 +609,77 @@ struct PromptsView: View {
     // MARK: - Persistence
 
     private struct PromptsState: Codable {
-        var dailyItems:        [PromptItem] = []
-        var weeklyItems:       [PromptItem] = []
-        var workItems:         [PromptItem] = []
-        var monthlyItems:      [PromptItem] = []
-        var yearlyItems:       [PromptItem] = []
-        var eventsItems:       [PromptItem] = []
-        var studyItems:        [PromptItem] = []
-        var mentalHealthItems: [PromptItem] = []
+        var dailyItems:        [PromptItem]
+        var weeklyItems:       [PromptItem]
+        var workItems:         [PromptItem]
+        var monthlyItems:      [PromptItem]
+        var yearlyItems:       [PromptItem]
+        var eventsItems:       [PromptItem]
+        var studyItems:        [PromptItem]
+        var mentalHealthItems: [PromptItem]
+
+        // Default init for new sessions
+        init(
+            dailyItems:        [PromptItem] = [],
+            weeklyItems:       [PromptItem] = [],
+            workItems:         [PromptItem] = [],
+            monthlyItems:      [PromptItem] = [],
+            yearlyItems:       [PromptItem] = [],
+            eventsItems:       [PromptItem] = [],
+            studyItems:        [PromptItem] = [],
+            mentalHealthItems: [PromptItem] = []
+        ) {
+            self.dailyItems        = dailyItems
+            self.weeklyItems       = weeklyItems
+            self.workItems         = workItems
+            self.monthlyItems      = monthlyItems
+            self.yearlyItems       = yearlyItems
+            self.eventsItems       = eventsItems
+            self.studyItems        = studyItems
+            self.mentalHealthItems = mentalHealthItems
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case dailyItems
+            case weeklyItems
+            case workItems
+            case monthlyItems
+            case yearlyItems
+            case eventsItems
+            case studyItems
+            case mentalHealthItems
+        }
+
+        // Custom decoder that tolerates missing keys (old files)
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+
+            func decodeItems(for key: CodingKeys) -> [PromptItem] {
+                (try? container.decode([PromptItem].self, forKey: key)) ?? []
+            }
+
+            self.dailyItems        = decodeItems(for: .dailyItems)
+            self.weeklyItems       = decodeItems(for: .weeklyItems)
+            self.workItems         = decodeItems(for: .workItems)
+            self.monthlyItems      = decodeItems(for: .monthlyItems)
+            self.yearlyItems       = decodeItems(for: .yearlyItems)
+            self.eventsItems       = decodeItems(for: .eventsItems)
+            self.studyItems        = decodeItems(for: .studyItems)
+            self.mentalHealthItems = decodeItems(for: .mentalHealthItems)
+        }
+
+        // Explicit encoder so Codable stays happy
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(dailyItems,        forKey: .dailyItems)
+            try container.encode(weeklyItems,       forKey: .weeklyItems)
+            try container.encode(workItems,         forKey: .workItems)
+            try container.encode(monthlyItems,      forKey: .monthlyItems)
+            try container.encode(yearlyItems,       forKey: .yearlyItems)
+            try container.encode(eventsItems,       forKey: .eventsItems)
+            try container.encode(studyItems,        forKey: .studyItems)
+            try container.encode(mentalHealthItems, forKey: .mentalHealthItems)
+        }
     }
 
     private func loadRules() {
@@ -632,13 +695,39 @@ struct PromptsView: View {
             DispatchQueue.global(qos: .utility).async {
                 let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                 let url = docs.appendingPathComponent("prompts.json")
+
+                #if DEBUG
+                print("📂 PromptsView: Loading prompts from \(url.path)")
+                #endif
+
                 var loaded = PromptsState()
-                if let data = try? Data(contentsOf: url) {
-                    let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-                    if let s = try? dec.decode(PromptsState.self, from: data) {
-                        loaded = s
+
+                do {
+                    guard FileManager.default.fileExists(atPath: url.path) else {
+                        #if DEBUG
+                        print("📂 PromptsView: No prompts.json file yet, starting empty")
+                        #endif
+                        throw NSError(domain: "PromptsView", code: 1, userInfo: nil)
                     }
+
+                    let data = try Data(contentsOf: url)
+                    #if DEBUG
+                    print("📂 PromptsView: Read \(data.count) bytes from prompts.json")
+                    #endif
+
+                    let dec = JSONDecoder()
+                    dec.dateDecodingStrategy = .iso8601
+                    loaded = try dec.decode(PromptsState.self, from: data)
+
+                    #if DEBUG
+                    print("📦 PromptsView: Decoded prompts: daily=\(loaded.dailyItems.count), weekly=\(loaded.weeklyItems.count), work=\(loaded.workItems.count)")
+                    #endif
+                } catch {
+                    #if DEBUG
+                    print("❌ PromptsView: Failed to load prompts.json:", error)
+                    #endif
                 }
+
                 DispatchQueue.main.async {
                     self.dailyItems        = loaded.dailyItems
                     self.weeklyItems       = loaded.weeklyItems
@@ -670,8 +759,16 @@ struct PromptsView: View {
         let enc = JSONEncoder()
         enc.outputFormatting = [.withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
-        if let data = try? enc.encode(state) {
-            try? data.write(to: url, options: .atomic)
+        do {
+            let data = try enc.encode(state)
+            try data.write(to: url, options: .atomic)
+            #if DEBUG
+            print("💾 PromptsView: Saved prompts to \(url.lastPathComponent)")
+            #endif
+        } catch {
+            #if DEBUG
+            print("❌ PromptsView: Failed to save prompts.json:", error)
+            #endif
         }
     }
 
