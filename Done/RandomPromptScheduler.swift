@@ -1,3 +1,4 @@
+//
 //  RandomPromptScheduler.swift
 //  Done
 //
@@ -10,12 +11,16 @@ import UserNotifications
 // Simple knobs we’ll expose in a settings screen later
 struct RandomPromptRules: Codable {
     // NOTE: promptsPerDay/minGapMinutes kept for backward-compat,
-    // but this build derives count from the window length.
+    // but this 20-min build derives count from the window length.
     var promptsPerDay: Int = 5              // (unused in this build)
     var dayStartHour: Int = 9               // window start (24h)
     var dayEndHour: Int = 20                // window end (24h)
-    var minGapMinutes: Int = 60             // (unused in this build)
-    var noRepeatDays: Int = 2               // don’t re-show same prompt within N days
+
+    // In this build we allow prompts to repeat within the same day.
+    // noRepeatDays > 0 would suppress prompts that were shown recently,
+    // but the default 0 means "no cross-day suppression".
+    var noRepeatDays: Int = 0               // don’t re-show within N days (0 = allow repeats)
+
     var weightImportant: Int = 3            // multiplier for "important" prompts (future)
 
     // Exact cadence controls
@@ -44,43 +49,48 @@ final class RandomPromptScheduler {
 
     // MARK: - Entry point
 
-    /// Call on app launch / when prompts or rules change.
-    /// Plans *today’s* notifications. If `forceRebuild` is true, it will
-    /// rebuild even if a plan already exists for today.
-    func refreshScheduleToday(
-        allPrompts: [PromptItem],
-        rules: RandomPromptRules = .init(),
-        forceRebuild: Bool = false
-    ) {
+    /// Call on app launch / when prompts change. Plans *today’s* notifications once.
+    func refreshScheduleToday(allPrompts: [PromptItem], rules: RandomPromptRules = .init(), forceRebuild: Bool = false) {
         guard !allPrompts.isEmpty else { return }
 
         var history = loadHistory()
         let todayKey = Self.dayKey(Date())
 
-        // Plan only once per calendar day unless explicitly forcing a rebuild.
-        if !forceRebuild, history.lastPlanDate == todayKey {
-            return
-        }
+        // Plan only once per calendar day, unless forceRebuild is true
+        if !forceRebuild, history.lastPlanDate == todayKey { return }
 
         // Cancel any pending plan from a previous run so we can rebuild fresh
         if !history.pendingIDs.isEmpty {
-            UNUserNotificationCenter.current()
-                .removePendingNotificationRequests(withIdentifiers: history.pendingIDs)
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: history.pendingIDs)
             history.pendingIDs.removeAll()
         }
 
-        // Filter candidates (non-empty text) and exclude recently shown within N days
         let now = Date()
-        let cutoff = Calendar.current.date(byAdding: .day, value: -rules.noRepeatDays, to: now) ?? now
-        var candidates = allPrompts.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        candidates.removeAll { p in
-            if let d = history.lastShown[p.id] { return d > cutoff }
-            return false
+        let cal = Calendar.current
+
+        // Filter candidates (non-empty text)
+        var candidates = allPrompts.filter {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        if candidates.isEmpty { candidates = allPrompts } // fallback
+
+        // Optional cross-day suppression:
+        // Only apply this if noRepeatDays > 0. With the default 0, prompts
+        // are allowed to appear multiple times per day and across days,
+        // with only the immediate duplicate protection still in place.
+        if rules.noRepeatDays > 0 {
+            let cutoff = cal.date(byAdding: .day, value: -rules.noRepeatDays, to: now) ?? now
+            candidates.removeAll { p in
+                if let d = history.lastShown[p.id] {
+                    return d > cutoff
+                }
+                return false
+            }
+            if candidates.isEmpty {
+                candidates = allPrompts
+            }
+        }
 
         // Build today’s window
-        let cal = Calendar.current
         guard
             let start0 = cal.date(bySettingHour: rules.dayStartHour, minute: 0, second: 0, of: now),
             let end0   = cal.date(bySettingHour: rules.dayEndHour, minute: 0, second: 0, of: now)
@@ -93,7 +103,7 @@ final class RandomPromptScheduler {
         let start = max(start0, now)
         let end = end0 <= start ? start.addingTimeInterval(3600) : end0 // guard against inverted window
 
-        // Generate interval slots from "next slot after now" up to end, capped at 64
+        // Generate 20-min slots from "next slot after now" up to end, capped at 64
         let times = Self.generateEveryInterval(
             start: start,
             end: end,
@@ -112,7 +122,7 @@ final class RandomPromptScheduler {
         var pool = candidates
         pool.shuffle(using: &rng)
 
-        // Load per-prompt temporal rules once
+        // load per-prompt temporal rules once
         let perPromptRules = PromptRulesStore.load()
 
         var scheduledIDs: [String] = []
@@ -120,21 +130,11 @@ final class RandomPromptScheduler {
         var scheduledCount = 0
 
         for (i, time) in times.enumerated() {
-            // Filter eligible prompts *for this exact fire time* by rules
-            let eligible = PromptSelector.eligible(
-                from: pool,
-                rules: perPromptRules,
-                at: time,
-                cal: cal
-            )
+            // filter eligible prompts *for this exact fire time* by rules
+            let eligible = PromptSelector.eligible(from: pool, rules: perPromptRules, at: time, cal: cal)
 
             // Pick next avoiding immediate duplicate; if no eligible, skip this slot
-            guard let next = pickNextPrompt(
-                fromEligible: eligible,
-                lastText: lastText,
-                fallback: pool,
-                rng: &rng
-            ) else {
+            guard let next = pickNextPrompt(fromEligible: eligible, lastText: lastText, fallback: pool, rng: &rng) else {
                 continue
             }
 
@@ -157,21 +157,24 @@ final class RandomPromptScheduler {
     }
 
     // MARK: - Pick helper (avoid immediate duplicate; respects eligibility)
-
     private func pickNextPrompt(fromEligible eligible: [PromptItem],
                                 lastText: String?,
                                 fallback: [PromptItem],
                                 rng: inout SeededRandom) -> PromptItem? {
-        if eligible.isEmpty {
-            // nothing eligible at this moment -> skip this slot
+        // Nothing eligible at this moment -> skip this slot
+        guard !eligible.isEmpty else {
             return nil
         }
-        if let lastText, let nonRepeat = eligible.first(where: { $0.text != lastText }) {
+
+        // Prefer a prompt whose text differs from the last one we scheduled,
+        // so we avoid back-to-back duplicates like "Get Milk, Get Milk".
+        if let lastText,
+           let nonRepeat = eligible.first(where: { $0.text != lastText }) {
             return nonRepeat
         }
-        return eligible.randomElement(using: &rng)
-            ?? eligible.first
-            ?? fallback.randomElement(using: &rng)
+
+        // Otherwise just pick any eligible prompt at random.
+        return eligible.randomElement(using: &rng) ?? eligible.first ?? fallback.randomElement(using: &rng)
     }
 
     // MARK: - IDs / History IO
@@ -185,18 +188,14 @@ final class RandomPromptScheduler {
         do {
             let data = try Data(contentsOf: historyURL)
             return try JSONDecoder().decode(History.self, from: data)
-        } catch {
-            return History()
-        }
+        } catch { return History() }
     }
 
     private func saveHistory(_ h: History) {
         do {
             let data = try JSONEncoder().encode(h)
             try data.write(to: historyURL, options: .atomic)
-        } catch {
-            // WIP: ignore for now
-        }
+        } catch { /* ignore for WIP */ }
     }
 
     private static func dayKey(_ date: Date) -> String {
@@ -253,9 +252,9 @@ final class RandomPromptScheduler {
 // Deterministic RNG
 struct SeededRandom: RandomNumberGenerator {
     private var state: UInt64
-    init(seed: UInt64) { self.state = seed &* 0x9e3779b97f4a7c15 }
+    init(seed: UInt64) { self.state = seed &* 0x9e377b97f4a7c15 }
     mutating func next() -> UInt64 {
-        state &+= 0x9e3779b97f4a7c15
+        state &+= 0x9e377b97f4a7c15
         var z = state
         z ^= z >> 30; z &*= 0xbf58476d1ce4e5b9
         z ^= z >> 27; z &*= 0x94d049bb133111eb
