@@ -1,4 +1,3 @@
-//
 //  RandomPromptScheduler.swift
 //  Done
 //
@@ -11,7 +10,7 @@ import UserNotifications
 // Simple knobs we’ll expose in a settings screen later
 struct RandomPromptRules: Codable {
     // NOTE: promptsPerDay/minGapMinutes kept for backward-compat,
-    // but this 20-min build derives count from the window length.
+    // but this build derives count from the window length.
     var promptsPerDay: Int = 5              // (unused in this build)
     var dayStartHour: Int = 9               // window start (24h)
     var dayEndHour: Int = 20                // window end (24h)
@@ -45,19 +44,28 @@ final class RandomPromptScheduler {
 
     // MARK: - Entry point
 
-    /// Call on app launch / when prompts change. Plans *today’s* notifications once.
-    func refreshScheduleToday(allPrompts: [PromptItem], rules: RandomPromptRules = .init()) {
+    /// Call on app launch / when prompts or rules change.
+    /// Plans *today’s* notifications. If `forceRebuild` is true, it will
+    /// rebuild even if a plan already exists for today.
+    func refreshScheduleToday(
+        allPrompts: [PromptItem],
+        rules: RandomPromptRules = .init(),
+        forceRebuild: Bool = false
+    ) {
         guard !allPrompts.isEmpty else { return }
 
         var history = loadHistory()
         let todayKey = Self.dayKey(Date())
 
-        // Plan only once per calendar day
-        if history.lastPlanDate == todayKey { return }
+        // Plan only once per calendar day unless explicitly forcing a rebuild.
+        if !forceRebuild, history.lastPlanDate == todayKey {
+            return
+        }
 
         // Cancel any pending plan from a previous run so we can rebuild fresh
         if !history.pendingIDs.isEmpty {
-            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: history.pendingIDs)
+            UNUserNotificationCenter.current()
+                .removePendingNotificationRequests(withIdentifiers: history.pendingIDs)
             history.pendingIDs.removeAll()
         }
 
@@ -85,7 +93,7 @@ final class RandomPromptScheduler {
         let start = max(start0, now)
         let end = end0 <= start ? start.addingTimeInterval(3600) : end0 // guard against inverted window
 
-        // Generate 20-min slots from "next slot after now" up to end, capped at 64
+        // Generate interval slots from "next slot after now" up to end, capped at 64
         let times = Self.generateEveryInterval(
             start: start,
             end: end,
@@ -104,7 +112,7 @@ final class RandomPromptScheduler {
         var pool = candidates
         pool.shuffle(using: &rng)
 
-        // load per-prompt temporal rules once
+        // Load per-prompt temporal rules once
         let perPromptRules = PromptRulesStore.load()
 
         var scheduledIDs: [String] = []
@@ -112,11 +120,21 @@ final class RandomPromptScheduler {
         var scheduledCount = 0
 
         for (i, time) in times.enumerated() {
-            // filter eligible prompts *for this exact fire time* by rules
-            let eligible = PromptSelector.eligible(from: pool, rules: perPromptRules, at: time, cal: cal)
+            // Filter eligible prompts *for this exact fire time* by rules
+            let eligible = PromptSelector.eligible(
+                from: pool,
+                rules: perPromptRules,
+                at: time,
+                cal: cal
+            )
 
             // Pick next avoiding immediate duplicate; if no eligible, skip this slot
-            guard let next = pickNextPrompt(fromEligible: eligible, lastText: lastText, fallback: pool, rng: &rng) else {
+            guard let next = pickNextPrompt(
+                fromEligible: eligible,
+                lastText: lastText,
+                fallback: pool,
+                rng: &rng
+            ) else {
                 continue
             }
 
@@ -139,6 +157,7 @@ final class RandomPromptScheduler {
     }
 
     // MARK: - Pick helper (avoid immediate duplicate; respects eligibility)
+
     private func pickNextPrompt(fromEligible eligible: [PromptItem],
                                 lastText: String?,
                                 fallback: [PromptItem],
@@ -150,7 +169,9 @@ final class RandomPromptScheduler {
         if let lastText, let nonRepeat = eligible.first(where: { $0.text != lastText }) {
             return nonRepeat
         }
-        return eligible.randomElement(using: &rng) ?? eligible.first ?? fallback.randomElement(using: &rng)
+        return eligible.randomElement(using: &rng)
+            ?? eligible.first
+            ?? fallback.randomElement(using: &rng)
     }
 
     // MARK: - IDs / History IO
@@ -164,14 +185,18 @@ final class RandomPromptScheduler {
         do {
             let data = try Data(contentsOf: historyURL)
             return try JSONDecoder().decode(History.self, from: data)
-        } catch { return History() }
+        } catch {
+            return History()
+        }
     }
 
     private func saveHistory(_ h: History) {
         do {
             let data = try JSONEncoder().encode(h)
             try data.write(to: historyURL, options: .atomic)
-        } catch { /* ignore for WIP */ }
+        } catch {
+            // WIP: ignore for now
+        }
     }
 
     private static func dayKey(_ date: Date) -> String {
@@ -180,6 +205,7 @@ final class RandomPromptScheduler {
     }
 
     // MARK: - Time generation (every N minutes, jittered, cap 64)
+
     private static func generateEveryInterval(start: Date,
                                               end: Date,
                                               intervalMinutes: Int,

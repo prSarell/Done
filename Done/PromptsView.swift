@@ -118,6 +118,26 @@ struct PromptsView: View {
     // If true + Date+Repeat: treat as monthly recurrence rather than yearly
     @State private var alertRepeatMonthly: Bool = false
 
+    // MARK: - Derived collections / helpers
+
+    private var allPromptItems: [PromptItem] {
+        dailyItems
+        + weeklyItems
+        + workItems
+        + monthlyItems
+        + yearlyItems
+        + eventsItems
+        + studyItems
+        + mentalHealthItems
+    }
+
+    private func scheduleRandomPrompts() {
+        RandomPromptScheduler.shared.refreshScheduleToday(
+            allPrompts: allPromptItems,
+            forceRebuild: true
+        )
+    }
+
     // MARK: - Body split into small pieces
 
     var body: some View {
@@ -137,18 +157,46 @@ struct PromptsView: View {
         .task {
             await loadFromDisk()
             loadRules()
+            scheduleRandomPrompts()   // plan based on loaded data
         }
         // Save prompts when any category changes
-        .onChange(of: dailyItems)        { _, _ in saveToDisk() }
-        .onChange(of: weeklyItems)       { _, _ in saveToDisk() }
-        .onChange(of: workItems)         { _, _ in saveToDisk() }
-        .onChange(of: monthlyItems)      { _, _ in saveToDisk() }
-        .onChange(of: yearlyItems)       { _, _ in saveToDisk() }
-        .onChange(of: eventsItems)       { _, _ in saveToDisk() }
-        .onChange(of: studyItems)        { _, _ in saveToDisk() }
-        .onChange(of: mentalHealthItems) { _, _ in saveToDisk() }
+        .onChange(of: dailyItems)        { _, _ in
+            saveToDisk()
+            scheduleRandomPrompts()
+        }
+        .onChange(of: weeklyItems)       { _, _ in
+            saveToDisk()
+            scheduleRandomPrompts()
+        }
+        .onChange(of: workItems)         { _, _ in
+            saveToDisk()
+            scheduleRandomPrompts()
+        }
+        .onChange(of: monthlyItems)      { _, _ in
+            saveToDisk()
+            scheduleRandomPrompts()
+        }
+        .onChange(of: yearlyItems)       { _, _ in
+            saveToDisk()
+            scheduleRandomPrompts()
+        }
+        .onChange(of: eventsItems)       { _, _ in
+            saveToDisk()
+            scheduleRandomPrompts()
+        }
+        .onChange(of: studyItems)        { _, _ in
+            saveToDisk()
+            scheduleRandomPrompts()
+        }
+        .onChange(of: mentalHealthItems) { _, _ in
+            saveToDisk()
+            scheduleRandomPrompts()
+        }
         // Save rules when changed
-        .onChange(of: rules) { _, _ in saveRules() }
+        .onChange(of: rules) { _, _ in
+            saveRules()
+            scheduleRandomPrompts()
+        }
         // Unified Alert editor sheet
         .sheet(isPresented: $showingAlertSheet) {
             alertEditorSheet()
@@ -562,7 +610,7 @@ struct PromptsView: View {
                     }
                     .pickerStyle(.segmented)
 
-                    // Option 2: only show "Repeat monthly" when a Date is set and Repeat is ON.
+                    // Only show "Repeat monthly" when a Date is set and Repeat is ON.
                     if alertDateEnabled && alertRepeats {
                         Toggle("Repeat monthly", isOn: $alertRepeatMonthly)
                     }
@@ -683,7 +731,6 @@ struct PromptsView: View {
         }
 
         // For this version we still rely mainly on date/weekday/time.
-        // Monthly/yearly fields are being prepared for future isActive() logic.
         rules[key] = rule
         showingAlertSheet = false
     }
