@@ -1,3 +1,5 @@
+// Path: Done/PromptsView.swift
+
 import SwiftUI
 
 // Codable-friendly model
@@ -110,6 +112,12 @@ struct PromptsView: View {
     @State private var alertDate: Date = Date()
     @State private var alertTime: Date = Date().addingTimeInterval(3600)
 
+    // false = Once, true = Repeat
+    @State private var alertRepeats: Bool = false
+
+    // If true + Date+Repeat: treat as monthly recurrence rather than yearly
+    @State private var alertRepeatMonthly: Bool = false
+
     // MARK: - Body split into small pieces
 
     var body: some View {
@@ -127,7 +135,7 @@ struct PromptsView: View {
         .navigationTitle("Prompts")
         .toolbar { EditButton() }
         .task {
-            loadFromDisk()
+            await loadFromDisk()
             loadRules()
         }
         // Save prompts when any category changes
@@ -361,6 +369,8 @@ struct PromptsView: View {
         alertWeekday = cal.component(.weekday, from: now)
         alertDate = now
         alertTime = now.addingTimeInterval(3600)
+        alertRepeats = false      // default Once
+        alertRepeatMonthly = false
 
         if let rule {
             // Day (weekday)
@@ -369,7 +379,7 @@ struct PromptsView: View {
                 alertWeekday = wd
             }
 
-            // Date
+            // Date (absolute)
             if let d = rule.date {
                 alertDateEnabled = true
                 alertDate = d
@@ -388,6 +398,24 @@ struct PromptsView: View {
                 } else {
                     alertTimeEnabled = true
                 }
+            }
+
+            // Once / Repeat from oneOff:
+            // oneOff == true  -> Once  -> alertRepeats = false
+            // oneOff == false -> Repeat -> alertRepeats = true
+            if let oneOff = rule.oneOff {
+                alertRepeats = !oneOff
+            } else {
+                alertRepeats = false // legacy default = Once
+            }
+
+            // Monthly pattern: if monthlyDay or monthlyIsLastDay is set,
+            // we treat this as a monthly recurrence in the UI.
+            if rule.monthlyDay != nil || (rule.monthlyIsLastDay ?? false) {
+                alertRepeatMonthly = true
+                alertRepeats = true
+            } else {
+                alertRepeatMonthly = false
             }
         }
 
@@ -527,8 +555,21 @@ struct PromptsView: View {
                     }
                 }
 
+                Section("Repeat") {
+                    Picker("Repeat", selection: $alertRepeats) {
+                        Text("Once").tag(false)
+                        Text("Repeat").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+
+                    // Option 2: only show "Repeat monthly" when a Date is set and Repeat is ON.
+                    if alertDateEnabled && alertRepeats {
+                        Toggle("Repeat monthly", isOn: $alertRepeatMonthly)
+                    }
+                }
+
                 Section {
-                    Text("You can turn on any combination of Day, Date, and Time.\n\nIf both Day and Date are on, the Date will effectively win for scheduling in this version.")
+                    Text("You can turn on any combination of Day, Date, and Time.\n\nIf both Day and Date are on, the Date will effectively win for scheduling in this version. \"Repeat monthly\" means use the day-of-month (or last day) as a monthly pattern.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -601,7 +642,48 @@ struct PromptsView: View {
             rule.timeMinute = nil
         }
 
-        // For this version we ignore more advanced monthly/yearly fields.
+        // Once / Repeat -> oneOff
+        // alertRepeats == false -> Once  -> oneOff = true
+        // alertRepeats == true  -> Repeat -> oneOff = false
+        rule.oneOff = !alertRepeats
+
+        // Monthly vs Yearly recurrence metadata
+        if alertDateEnabled && alertRepeats {
+            if alertRepeatMonthly {
+                // Monthly pattern: derive day-of-month from alertDate
+                let comps = cal.dateComponents([.day], from: alertDate)
+                if let d = comps.day {
+                    // If this is the last day of that month, store as "last day"
+                    if let range = cal.range(of: .day, in: .month, for: alertDate),
+                       d == range.count {
+                        rule.monthlyIsLastDay = true
+                        rule.monthlyDay = nil
+                    } else {
+                        rule.monthlyDay = d
+                        rule.monthlyIsLastDay = false
+                    }
+                }
+                // Monthly pattern doesn't need explicit month/day (yearly)
+                rule.month = nil
+                rule.day = nil
+            } else {
+                // Not monthly: treat as a (future) yearly pattern using month/day
+                let comps = cal.dateComponents([.month, .day], from: alertDate)
+                rule.month = comps.month
+                rule.day = comps.day
+                rule.monthlyDay = nil
+                rule.monthlyIsLastDay = nil
+            }
+        } else {
+            // No date or not repeating: clear advanced recurrence metadata
+            rule.month = nil
+            rule.day = nil
+            rule.monthlyDay = nil
+            rule.monthlyIsLastDay = nil
+        }
+
+        // For this version we still rely mainly on date/weekday/time.
+        // Monthly/yearly fields are being prepared for future isActive() logic.
         rules[key] = rule
         showingAlertSheet = false
     }
@@ -609,76 +691,14 @@ struct PromptsView: View {
     // MARK: - Persistence
 
     private struct PromptsState: Codable {
-        var dailyItems:        [PromptItem]
-        var weeklyItems:       [PromptItem]
-        var workItems:         [PromptItem]
-        var monthlyItems:      [PromptItem]
-        var yearlyItems:       [PromptItem]
-        var eventsItems:       [PromptItem]
-        var studyItems:        [PromptItem]
-        var mentalHealthItems: [PromptItem]
-
-        // Default init for new sessions
-        init(
-            dailyItems:        [PromptItem] = [],
-            weeklyItems:       [PromptItem] = [],
-            workItems:         [PromptItem] = [],
-            monthlyItems:      [PromptItem] = [],
-            yearlyItems:       [PromptItem] = [],
-            eventsItems:       [PromptItem] = [],
-            studyItems:        [PromptItem] = [],
-            mentalHealthItems: [PromptItem] = []
-        ) {
-            self.dailyItems        = dailyItems
-            self.weeklyItems       = weeklyItems
-            self.workItems         = workItems
-            self.monthlyItems      = monthlyItems
-            self.yearlyItems       = yearlyItems
-            self.eventsItems       = eventsItems
-            self.studyItems        = studyItems
-            self.mentalHealthItems = mentalHealthItems
-        }
-
-        private enum CodingKeys: String, CodingKey {
-            case dailyItems
-            case weeklyItems
-            case workItems
-            case monthlyItems
-            case yearlyItems
-            case eventsItems
-            case studyItems
-            case mentalHealthItems
-        }
-
-        // Custom decoder that tolerates missing keys (old files)
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-
-            func decodeItems(for key: CodingKeys) -> [PromptItem] {
-                (try? container.decode([PromptItem].self, forKey: key)) ?? []
-            }
-
-            self.dailyItems        = decodeItems(for: .dailyItems)
-            self.weeklyItems       = decodeItems(for: .weeklyItems)
-            self.workItems         = decodeItems(for: .workItems)
-            self.monthlyItems      = decodeItems(for: .monthlyItems)
-            self.yearlyItems       = decodeItems(for: .yearlyItems)
-            self.eventsItems       = decodeItems(for: .eventsItems)
-            self.studyItems        = decodeItems(for: .studyItems)
-            self.mentalHealthItems = decodeItems(for: .mentalHealthItems)
-        }
-
-        func encode(to encoder: Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encode(dailyItems,        forKey: .dailyItems)
-            try container.encode(weeklyItems,       forKey: .weeklyItems)
-            try container.encode(workItems,         forKey: .workItems)
-            try container.encode(monthlyItems,      forKey: .monthlyItems)
-            try container.encode(yearlyItems,       forKey: .yearlyItems)
-            try container.encode(eventsItems,       forKey: .eventsItems)
-            try container.encode(studyItems,        forKey: .studyItems)
-            try container.encode(mentalHealthItems, forKey: .mentalHealthItems)
-        }
+        var dailyItems:        [PromptItem] = []
+        var weeklyItems:       [PromptItem] = []
+        var workItems:         [PromptItem] = []
+        var monthlyItems:      [PromptItem] = []
+        var yearlyItems:       [PromptItem] = []
+        var eventsItems:       [PromptItem] = []
+        var studyItems:        [PromptItem] = []
+        var mentalHealthItems: [PromptItem] = []
     }
 
     private func loadRules() {
@@ -689,54 +709,29 @@ struct PromptsView: View {
         PromptRulesStore.save(rules)
     }
 
-    private func loadFromDisk() {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let url = docs.appendingPathComponent("prompts.json")
-
-        #if DEBUG
-        print("📂 PromptsView: Loading prompts from \(url.path)")
-        #endif
-
-        DispatchQueue.global(qos: .utility).async {
-            var loaded = PromptsState()
-
-            do {
-                guard FileManager.default.fileExists(atPath: url.path) else {
-                    #if DEBUG
-                    print("📂 PromptsView: No prompts.json file yet, starting empty")
-                    #endif
-                    throw NSError(domain: "PromptsView", code: 1, userInfo: nil)
+    private func loadFromDisk() async {
+        await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .utility).async {
+                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                let url = docs.appendingPathComponent("prompts.json")
+                var loaded = PromptsState()
+                if let data = try? Data(contentsOf: url) {
+                    let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+                    if let s = try? dec.decode(PromptsState.self, from: data) {
+                        loaded = s
+                    }
                 }
-
-                let data = try Data(contentsOf: url)
-
-                #if DEBUG
-                print("📂 PromptsView: Read \(data.count) bytes from prompts.json")
-                #endif
-
-                let dec = JSONDecoder()
-                dec.dateDecodingStrategy = .iso8601
-                loaded = try dec.decode(PromptsState.self, from: data)
-
-                #if DEBUG
-                print("📦 PromptsView: Decoded prompts - daily=\(loaded.dailyItems.count), weekly=\(loaded.weeklyItems.count), work=\(loaded.workItems.count)")
-                #endif
-
-            } catch {
-                #if DEBUG
-                print("❌ PromptsView: Failed to load prompts.json:", error)
-                #endif
-            }
-
-            DispatchQueue.main.async {
-                self.dailyItems        = loaded.dailyItems
-                self.weeklyItems       = loaded.weeklyItems
-                self.workItems         = loaded.workItems
-                self.monthlyItems      = loaded.monthlyItems
-                self.yearlyItems       = loaded.yearlyItems
-                self.eventsItems       = loaded.eventsItems
-                self.studyItems        = loaded.studyItems
-                self.mentalHealthItems = loaded.mentalHealthItems
+                DispatchQueue.main.async {
+                    self.dailyItems        = loaded.dailyItems
+                    self.weeklyItems       = loaded.weeklyItems
+                    self.workItems         = loaded.workItems
+                    self.monthlyItems      = loaded.monthlyItems
+                    self.yearlyItems       = loaded.yearlyItems
+                    self.eventsItems       = loaded.eventsItems
+                    self.studyItems        = loaded.studyItems
+                    self.mentalHealthItems = loaded.mentalHealthItems
+                    cont.resume()
+                }
             }
         }
     }
@@ -757,17 +752,8 @@ struct PromptsView: View {
         let enc = JSONEncoder()
         enc.outputFormatting = [.withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
-
-        do {
-            let data = try enc.encode(state)
-            try data.write(to: url, options: .atomic)
-            #if DEBUG
-            print("💾 PromptsView: Saved prompts to \(url.lastPathComponent)")
-            #endif
-        } catch {
-            #if DEBUG
-            print("❌ PromptsView: Failed to save prompts.json:", error)
-            #endif
+        if let data = try? enc.encode(state) {
+            try? data.write(to: url, options: .atomic)
         }
     }
 

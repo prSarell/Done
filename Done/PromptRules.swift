@@ -1,3 +1,5 @@
+// Path: Done/Storage/PromptsRules.swift
+
 import Foundation
 
 // 1 = Sunday … 7 = Saturday (Calendar.current.weekday)
@@ -22,7 +24,10 @@ public struct PromptRule: Codable, Equatable {
     public var monthlyIsLastDay: Bool?
 
     // Behaviour
-    public var oneOff: Bool?           // if nil and date != nil -> treated as one-off
+    // oneOff == true  -> treat as one-off
+    // oneOff == false -> treat as recurring
+    // oneOff == nil   -> legacy: if date != nil, treated as one-off by default
+    public var oneOff: Bool?
     public var windowMinutes: Int = 120 // active window centered on time (default ±60m)
 
     public init(timeHour: Int? = nil,
