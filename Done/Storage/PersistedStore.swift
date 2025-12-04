@@ -7,7 +7,6 @@ public final class PersistedStore<Item: Codable> {
     private let fileURL: URL
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
-    private let queue = DispatchQueue(label: "PersistedStore.\(Item.self)", qos: .utility)
     
     // MARK: - Init
     
@@ -21,6 +20,14 @@ public final class PersistedStore<Item: Codable> {
         
         // Decoder configuration
         decoder.dateDecodingStrategy = .iso8601
+        
+        #if DEBUG
+        print("📂 PersistedStore init for \(Item.self)")
+        print("   → Documents dir: \(docs.path)")
+        print("   → File: \(fileURL.lastPathComponent)")
+        let existsAtInit = FileManager.default.fileExists(atPath: fileURL.path)
+        print("   → File exists at init? \(existsAtInit)")
+        #endif
     }
     
     
@@ -67,26 +74,22 @@ public final class PersistedStore<Item: Codable> {
     
     // MARK: - Save
     
-    /// Saves items to disk on a background queue.
+    /// Saves items to disk synchronously.
     /// Uses atomic writes to avoid file corruption.
     public func save(_ items: [Item]) {
-        
-        queue.async { [weak self] in
-            guard let self = self else { return }
+        do {
+            let data = try encoder.encode(items)
+            try data.write(to: fileURL, options: [.atomic])
             
-            do {
-                let data = try self.encoder.encode(items)
-                try data.write(to: self.fileURL, options: [.atomic])
-                
-                #if DEBUG
-                print("💾 PersistedStore: Saved \(items.count) \(Item.self) items to \(self.fileURL.lastPathComponent)")
-                #endif
-                
-            } catch {
-                #if DEBUG
-                print("❌ PersistedStore save error for \(self.fileURL.lastPathComponent): \(error)")
-                #endif
-            }
+            #if DEBUG
+            print("💾 PersistedStore: Saved \(items.count) \(Item.self) items to \(fileURL.lastPathComponent)")
+            print("📂 PersistedStore: File path: \(fileURL.path)")
+            #endif
+            
+        } catch {
+            #if DEBUG
+            print("❌ PersistedStore save error for \(fileURL.lastPathComponent): \(error)")
+            #endif
         }
     }
 }

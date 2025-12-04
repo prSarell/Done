@@ -118,9 +118,14 @@ final class RandomPromptScheduler {
         }
 
         // Deterministic pool shuffle (kept from your version)
-        var rng = SeededRandom(seed: UInt64(todayKey.hashValue ^ candidates.count))
+        let seedInt = todayKey.hashValue ^ candidates.count          // Int
+        let seed = UInt64(bitPattern: Int64(seedInt))                // Int -> Int64 -> UInt64
+
+        var rng = SeededRandom(seed: seed)
         var pool = candidates
         pool.shuffle(using: &rng)
+
+
 
         // load per-prompt temporal rules once
         let perPromptRules = PromptRulesStore.load()
