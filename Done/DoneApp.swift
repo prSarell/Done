@@ -1,42 +1,63 @@
+// File: Done/DoneApp.swift
+// Purpose:
+// - App entry point
+// - Provides TimerNotesViewModel as an EnvironmentObject
+// - Requests notification permissions
+// - Performs one-off prompt cleanup WITHOUT risking overwriting prompts.json on load/decode failure
+// - Loads prompts from disk and refreshes today's random schedule
+// - Prevents repeated scheduling spam by gating "plan today" to once per foreground session
+
 import SwiftUI
 import UserNotifications
 import UIKit
 
 @main
 struct DoneApp: App {
-    // Provide the notes VM app-wide so TimerView can save notes
     @StateObject private var notesVM = TimerNotesViewModel()
+
+    // Gate scheduling so we don't spam-refresh during launch / permission prompts
+    @State private var didPlanThisForeground = false
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(notesVM)
                 .onAppear {
-                    // Notifications
                     NotificationsManager.shared.requestAuthorization()
 
-                    // Clean up any "one-off" prompts whose dated rule has passed (safe no-op if none)
-                    performOneOffCleanup()
+                    // Only plan once per foreground session
+                    if !didPlanThisForeground {
+                        didPlanThisForeground = true
 
-                    // Load prompts + schedule the day
-                    let prompts = loadAllPromptsFromDisk()
-                    RandomPromptScheduler.shared.refreshScheduleToday(allPrompts: prompts)
+                        performOneOffCleanup()
 
-                    // Optional visibility for testing
-                    UNUserNotificationCenter.current().getPendingNotificationRequests { reqs in
-                        print("Pending notifications:", reqs.count)
+                        let prompts = loadAllPromptsFromDisk()
+                        RandomPromptScheduler.shared.refreshScheduleToday(allPrompts: prompts)
+
+                        UNUserNotificationCenter.current().getPendingNotificationRequests { reqs in
+                            print("Pending notifications:", reqs.count)
+                        }
                     }
                 }
-                // Optional: re-plan when returning to foreground (picks up any rule/prompt edits)
+                // When app becomes active again later, allow a re-plan (once)
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-                    let prompts = loadAllPromptsFromDisk()
-                    RandomPromptScheduler.shared.refreshScheduleToday(allPrompts: prompts)
+                    if !didPlanThisForeground {
+                        didPlanThisForeground = true
+
+                        let prompts = loadAllPromptsFromDisk()
+                        RandomPromptScheduler.shared.refreshScheduleToday(allPrompts: prompts)
+                    }
+                }
+                // When leaving foreground, reset the gate so next foreground can plan once
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                    didPlanThisForeground = false
                 }
         }
     }
 }
 
 // MARK: - Prompts load/save helpers (same schema PromptsView uses)
+
 private struct PromptsState: Codable {
     var dailyItems:        [PromptItem] = []
     var weeklyItems:       [PromptItem] = []
@@ -47,34 +68,79 @@ private struct PromptsState: Codable {
     var mentalHealthItems: [PromptItem] = []
 }
 
+/// Returns all prompt items across all categories for scheduling.
+/// IMPORTANT: If prompts.json fails to load/decode, returns [] but does NOT write anything to disk.
 private func loadAllPromptsFromDisk() -> [PromptItem] {
-    let s = loadPromptsState()
+    guard let s = loadPromptsStateSafe() else {
+        #if DEBUG
+        print("🛑 loadAllPromptsFromDisk: prompts.json failed to load; returning [] for scheduling only.")
+        #endif
+        return []
+    }
+
     return s.dailyItems + s.weeklyItems + s.monthlyItems + s.yearlyItems +
            s.eventsItems + s.studyItems + s.mentalHealthItems
 }
 
-private func loadPromptsState() -> PromptsState {
+/// Safe loader:
+/// - If prompts.json does not exist, returns an empty PromptsState (first-run case).
+/// - If reading/decoding fails, returns nil (so callers can avoid overwriting prompts.json with empty state).
+private func loadPromptsStateSafe() -> PromptsState? {
     let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     let url = docs.appendingPathComponent("prompts.json")
+
+    // Missing file is normal on first run
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        return PromptsState()
+    }
+
     do {
         let data = try Data(contentsOf: url)
-        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
         return try dec.decode(PromptsState.self, from: data)
     } catch {
-        return PromptsState()
+        #if DEBUG
+        print("❌ loadPromptsStateSafe failed: \(error)")
+        print("   → Bundle: \(Bundle.main.bundleIdentifier ?? "nil")")
+        print("   → File: \(url.path)")
+        #endif
+        return nil
     }
 }
 
+/// Writes prompts.json atomically.
 private func savePromptsState(_ state: PromptsState) {
     let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     let url = docs.appendingPathComponent("prompts.json")
-    let enc = JSONEncoder(); enc.outputFormatting = [.withoutEscapingSlashes]; enc.dateEncodingStrategy = .iso8601
+
+    let enc = JSONEncoder()
+    enc.outputFormatting = [.withoutEscapingSlashes]
+    enc.dateEncodingStrategy = .iso8601
+
     if let data = try? enc.encode(state) {
-        try? data.write(to: url, options: .atomic)
+        do {
+            try data.write(to: url, options: .atomic)
+            #if DEBUG
+            print("💾 savePromptsState: wrote prompts.json (\(data.count) bytes)")
+            print("   → Bundle: \(Bundle.main.bundleIdentifier ?? "nil")")
+            print("   → File: \(url.path)")
+            #endif
+        } catch {
+            #if DEBUG
+            print("❌ savePromptsState write error: \(error)")
+            print("   → File: \(url.path)")
+            #endif
+        }
+    } else {
+        #if DEBUG
+        print("❌ savePromptsState: failed to encode PromptsState")
+        #endif
     }
 }
 
 // MARK: - One-off cleanup (delete prompts whose dated rule has passed)
+
 private func performOneOffCleanup() {
     var rules = PromptRulesStore.load()
     guard !rules.isEmpty else { return }
@@ -90,9 +156,15 @@ private func performOneOffCleanup() {
 
     guard !toDeleteTexts.isEmpty else { return }
 
-    // Remove those prompts from PromptsState and from rules file
-    var state = loadPromptsState()
-    let filter: ([PromptItem]) -> [PromptItem] = { arr in arr.filter { !toDeleteTexts.contains($0.text) } }
+    // CRITICAL: only proceed if prompts.json loads successfully.
+    guard var state = loadPromptsStateSafe() else {
+        print("🛑 OneOffCleanup: aborted because prompts.json failed to load (preventing overwrite).")
+        return
+    }
+
+    let filter: ([PromptItem]) -> [PromptItem] = { arr in
+        arr.filter { !toDeleteTexts.contains($0.text) }
+    }
 
     state.dailyItems        = filter(state.dailyItems)
     state.weeklyItems       = filter(state.weeklyItems)

@@ -118,6 +118,14 @@ struct PromptsView: View {
     // If true + Date+Repeat: treat as monthly recurrence rather than yearly
     @State private var alertRepeatMonthly: Bool = false
 
+    // MARK: - Safety gates / debouncers
+
+    /// Prevents "load → assign arrays → onChange → save empty" wipes.
+    @State private var hasFinishedInitialLoad: Bool = false
+
+    /// Debounce schedule rebuilds so we don’t spam notifications while typing/editing.
+    @State private var scheduleTask: Task<Void, Never>?
+
     // MARK: - Derived collections / helpers
 
     private var allPromptItems: [PromptItem] {
@@ -131,11 +139,16 @@ struct PromptsView: View {
         + mentalHealthItems
     }
 
-    private func scheduleRandomPrompts() {
-        RandomPromptScheduler.shared.refreshScheduleToday(
-            allPrompts: allPromptItems,
-            forceRebuild: true
-        )
+    private func scheduleRandomPromptsDebounced(forceRebuild: Bool) {
+        scheduleTask?.cancel()
+        scheduleTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
+            if Task.isCancelled { return }
+            RandomPromptScheduler.shared.refreshScheduleToday(
+                allPrompts: allPromptItems,
+                forceRebuild: forceRebuild
+            )
+        }
     }
 
     // MARK: - Body split into small pieces
@@ -155,52 +168,47 @@ struct PromptsView: View {
         .navigationTitle("Prompts")
         .toolbar { EditButton() }
         .task {
-            await loadFromDisk()
+            // Important: gate all onChange saves until load + rules load completed
+            hasFinishedInitialLoad = false
+
+            await loadFromDiskSafely()
             loadRules()
-            scheduleRandomPrompts()   // plan based on loaded data
+
+            hasFinishedInitialLoad = true
+
+            // Plan once based on loaded data (NOT repeatedly during load)
+            RandomPromptScheduler.shared.refreshScheduleToday(
+                allPrompts: allPromptItems,
+                forceRebuild: true
+            )
         }
         // Save prompts when any category changes
-        .onChange(of: dailyItems)        { _, _ in
-            saveToDisk()
-            scheduleRandomPrompts()
-        }
-        .onChange(of: weeklyItems)       { _, _ in
-            saveToDisk()
-            scheduleRandomPrompts()
-        }
-        .onChange(of: workItems)         { _, _ in
-            saveToDisk()
-            scheduleRandomPrompts()
-        }
-        .onChange(of: monthlyItems)      { _, _ in
-            saveToDisk()
-            scheduleRandomPrompts()
-        }
-        .onChange(of: yearlyItems)       { _, _ in
-            saveToDisk()
-            scheduleRandomPrompts()
-        }
-        .onChange(of: eventsItems)       { _, _ in
-            saveToDisk()
-            scheduleRandomPrompts()
-        }
-        .onChange(of: studyItems)        { _, _ in
-            saveToDisk()
-            scheduleRandomPrompts()
-        }
-        .onChange(of: mentalHealthItems) { _, _ in
-            saveToDisk()
-            scheduleRandomPrompts()
-        }
+        .onChange(of: dailyItems)        { _, _ in onPromptsMutated() }
+        .onChange(of: weeklyItems)       { _, _ in onPromptsMutated() }
+        .onChange(of: workItems)         { _, _ in onPromptsMutated() }
+        .onChange(of: monthlyItems)      { _, _ in onPromptsMutated() }
+        .onChange(of: yearlyItems)       { _, _ in onPromptsMutated() }
+        .onChange(of: eventsItems)       { _, _ in onPromptsMutated() }
+        .onChange(of: studyItems)        { _, _ in onPromptsMutated() }
+        .onChange(of: mentalHealthItems) { _, _ in onPromptsMutated() }
+
         // Save rules when changed
         .onChange(of: rules) { _, _ in
+            guard hasFinishedInitialLoad else { return }
             saveRules()
-            scheduleRandomPrompts()
+            scheduleRandomPromptsDebounced(forceRebuild: true)
         }
+
         // Unified Alert editor sheet
         .sheet(isPresented: $showingAlertSheet) {
             alertEditorSheet()
         }
+    }
+
+    private func onPromptsMutated() {
+        guard hasFinishedInitialLoad else { return }
+        saveToDisk()
+        scheduleRandomPromptsDebounced(forceRebuild: true)
     }
 
     // MARK: - Header + List split out
@@ -400,6 +408,7 @@ struct PromptsView: View {
     }
 
     // MARK: - Unified Alert helpers
+    // (UNCHANGED from your version)
 
     private func startEditingAlert(for item: PromptItem) {
         let key = item.text
@@ -421,26 +430,18 @@ struct PromptsView: View {
         alertRepeatMonthly = false
 
         if let rule {
-            // Day (weekday)
             if let wd = rule.weekday {
                 alertDayEnabled = true
                 alertWeekday = wd
             }
 
-            // Date (absolute)
             if let d = rule.date {
                 alertDateEnabled = true
                 alertDate = d
             }
 
-            // Time
             if let h = rule.timeHour, let m = rule.timeMinute {
-                if let composed = cal.date(
-                    bySettingHour: h,
-                    minute: m,
-                    second: 0,
-                    of: now
-                ) {
+                if let composed = cal.date(bySettingHour: h, minute: m, second: 0, of: now) {
                     alertTimeEnabled = true
                     alertTime = composed
                 } else {
@@ -448,17 +449,12 @@ struct PromptsView: View {
                 }
             }
 
-            // Once / Repeat from oneOff:
-            // oneOff == true  -> Once  -> alertRepeats = false
-            // oneOff == false -> Repeat -> alertRepeats = true
             if let oneOff = rule.oneOff {
                 alertRepeats = !oneOff
             } else {
-                alertRepeats = false // legacy default = Once
+                alertRepeats = false
             }
 
-            // Monthly pattern: if monthlyDay or monthlyIsLastDay is set,
-            // we treat this as a monthly recurrence in the UI.
             if rule.monthlyDay != nil || (rule.monthlyIsLastDay ?? false) {
                 alertRepeatMonthly = true
                 alertRepeats = true
@@ -472,17 +468,13 @@ struct PromptsView: View {
 
     private func alertLabel(for item: PromptItem) -> String {
         let key = item.text
-        guard let rule = rules[key] else {
-            return "Alert"
-        }
+        guard let rule = rules[key] else { return "Alert" }
 
         let hasDay = (rule.weekday != nil)
         let hasDate = (rule.date != nil)
         let hasTime = (rule.timeHour != nil && rule.timeMinute != nil)
 
-        if !hasDay && !hasDate && !hasTime {
-            return "Alert"
-        }
+        if !hasDay && !hasDate && !hasTime { return "Alert" }
 
         let cal = Calendar.current
         let dfDate = DateFormatter()
@@ -493,19 +485,12 @@ struct PromptsView: View {
         dfTime.dateStyle = .none
         dfTime.timeStyle = .short
 
-        // Prefer Date when both Date + Day are set
         if let date = rule.date {
-            // Compose a date at the stored time if present, otherwise use date-only
             var dateToShow = date
             if hasTime,
                let h = rule.timeHour,
                let m = rule.timeMinute,
-               let composed = cal.date(
-                    bySettingHour: h,
-                    minute: m,
-                    second: 0,
-                    of: date
-               ) {
+               let composed = cal.date(bySettingHour: h, minute: m, second: 0, of: date) {
                 dateToShow = composed
             }
 
@@ -518,7 +503,6 @@ struct PromptsView: View {
             }
         }
 
-        // No Date, but maybe Day / Time
         if let wd = rule.weekday {
             let dayName = weekdayName(for: wd)
 
@@ -537,14 +521,12 @@ struct PromptsView: View {
             }
         }
 
-        // Time-only: treat as "every day at HH:mm"
         if hasTime,
            let h = rule.timeHour,
            let m = rule.timeMinute {
             let now = Date()
             if let t = cal.date(bySettingHour: h, minute: m, second: 0, of: now) {
-                let timeStr = dfTime.string(from: t)
-                return timeStr
+                return dfTime.string(from: t)
             } else {
                 return "Time set"
             }
@@ -554,7 +536,7 @@ struct PromptsView: View {
     }
 
     private func weekdayName(for weekday: Int) -> String {
-        let symbols = Calendar.current.shortWeekdaySymbols // Sun…Sat
+        let symbols = Calendar.current.shortWeekdaySymbols
         guard weekday >= 1, weekday <= symbols.count else { return "Day" }
         return symbols[weekday - 1]
     }
@@ -579,27 +561,19 @@ struct PromptsView: View {
                     Toggle("Date", isOn: $alertDateEnabled)
 
                     if alertDateEnabled {
-                        DatePicker(
-                            "Date",
-                            selection: $alertDate,
-                            displayedComponents: [.date]
-                        )
-                        .datePickerStyle(.wheel)
-                        .labelsHidden()
-                        .frame(maxHeight: 180)
+                        DatePicker("Date", selection: $alertDate, displayedComponents: [.date])
+                            .datePickerStyle(.wheel)
+                            .labelsHidden()
+                            .frame(maxHeight: 180)
                     }
 
                     Toggle("Time", isOn: $alertTimeEnabled)
 
                     if alertTimeEnabled {
-                        DatePicker(
-                            "Time",
-                            selection: $alertTime,
-                            displayedComponents: [.hourAndMinute]
-                        )
-                        .datePickerStyle(.wheel)
-                        .labelsHidden()
-                        .frame(maxHeight: 180)
+                        DatePicker("Time", selection: $alertTime, displayedComponents: [.hourAndMinute])
+                            .datePickerStyle(.wheel)
+                            .labelsHidden()
+                            .frame(maxHeight: 180)
                     }
                 }
 
@@ -610,7 +584,6 @@ struct PromptsView: View {
                     }
                     .pickerStyle(.segmented)
 
-                    // Only show "Repeat monthly" when a Date is set and Repeat is ON.
                     if alertDateEnabled && alertRepeats {
                         Toggle("Repeat monthly", isOn: $alertRepeatMonthly)
                     }
@@ -626,24 +599,18 @@ struct PromptsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        showingAlertSheet = false
-                    }
+                    Button("Cancel") { showingAlertSheet = false }
                 }
                 ToolbarItem(placement: .destructiveAction) {
                     if let key = editingAlertPromptText, rules[key] != nil {
                         Button("Clear") {
-                            if let key = editingAlertPromptText {
-                                rules[key] = nil
-                            }
+                            if let key = editingAlertPromptText { rules[key] = nil }
                             showingAlertSheet = false
                         }
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        saveAlertEdits()
-                    }
+                    Button("Save") { saveAlertEdits() }
                 }
             }
         }
@@ -655,7 +622,6 @@ struct PromptsView: View {
             return
         }
 
-        // If all toggles off, remove the rule entirely
         if !alertDayEnabled && !alertDateEnabled && !alertTimeEnabled {
             rules[key] = nil
             showingAlertSheet = false
@@ -665,14 +631,8 @@ struct PromptsView: View {
         var rule = rules[key] ?? PromptRule()
         let cal = Calendar.current
 
-        // Day
-        if alertDayEnabled {
-            rule.weekday = alertWeekday
-        } else {
-            rule.weekday = nil
-        }
+        if alertDayEnabled { rule.weekday = alertWeekday } else { rule.weekday = nil }
 
-        // Date
         if alertDateEnabled {
             let comps = cal.dateComponents([.year, .month, .day], from: alertDate)
             rule.date = cal.date(from: comps)
@@ -680,7 +640,6 @@ struct PromptsView: View {
             rule.date = nil
         }
 
-        // Time
         if alertTimeEnabled {
             let comps = cal.dateComponents([.hour, .minute], from: alertTime)
             rule.timeHour = comps.hour
@@ -690,18 +649,12 @@ struct PromptsView: View {
             rule.timeMinute = nil
         }
 
-        // Once / Repeat -> oneOff
-        // alertRepeats == false -> Once  -> oneOff = true
-        // alertRepeats == true  -> Repeat -> oneOff = false
         rule.oneOff = !alertRepeats
 
-        // Monthly vs Yearly recurrence metadata
         if alertDateEnabled && alertRepeats {
             if alertRepeatMonthly {
-                // Monthly pattern: derive day-of-month from alertDate
                 let comps = cal.dateComponents([.day], from: alertDate)
                 if let d = comps.day {
-                    // If this is the last day of that month, store as "last day"
                     if let range = cal.range(of: .day, in: .month, for: alertDate),
                        d == range.count {
                         rule.monthlyIsLastDay = true
@@ -711,11 +664,9 @@ struct PromptsView: View {
                         rule.monthlyIsLastDay = false
                     }
                 }
-                // Monthly pattern doesn't need explicit month/day (yearly)
                 rule.month = nil
                 rule.day = nil
             } else {
-                // Not monthly: treat as a (future) yearly pattern using month/day
                 let comps = cal.dateComponents([.month, .day], from: alertDate)
                 rule.month = comps.month
                 rule.day = comps.day
@@ -723,14 +674,12 @@ struct PromptsView: View {
                 rule.monthlyIsLastDay = nil
             }
         } else {
-            // No date or not repeating: clear advanced recurrence metadata
             rule.month = nil
             rule.day = nil
             rule.monthlyDay = nil
             rule.monthlyIsLastDay = nil
         }
 
-        // For this version we still rely mainly on date/weekday/time.
         rules[key] = rule
         showingAlertSheet = false
     }
@@ -756,28 +705,59 @@ struct PromptsView: View {
         PromptRulesStore.save(rules)
     }
 
-    private func loadFromDisk() async {
+    /// Safe async load:
+    /// - If file doesn't exist: loads empty (first run) and that's fine.
+    /// - If file exists but decode fails: logs and DOES NOT overwrite current in-memory arrays.
+    private func loadFromDiskSafely() async {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .utility).async {
                 let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                 let url = docs.appendingPathComponent("prompts.json")
-                var loaded = PromptsState()
-                if let data = try? Data(contentsOf: url) {
-                    let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-                    if let s = try? dec.decode(PromptsState.self, from: data) {
-                        loaded = s
+
+                // Missing file is normal on first run
+                guard FileManager.default.fileExists(atPath: url.path) else {
+                    DispatchQueue.main.async {
+                        self.dailyItems        = []
+                        self.weeklyItems       = []
+                        self.workItems         = []
+                        self.monthlyItems      = []
+                        self.yearlyItems       = []
+                        self.eventsItems       = []
+                        self.studyItems        = []
+                        self.mentalHealthItems = []
+                        cont.resume()
                     }
+                    return
                 }
-                DispatchQueue.main.async {
-                    self.dailyItems        = loaded.dailyItems
-                    self.weeklyItems       = loaded.weeklyItems
-                    self.workItems         = loaded.workItems
-                    self.monthlyItems      = loaded.monthlyItems
-                    self.yearlyItems       = loaded.yearlyItems
-                    self.eventsItems       = loaded.eventsItems
-                    self.studyItems        = loaded.studyItems
-                    self.mentalHealthItems = loaded.mentalHealthItems
-                    cont.resume()
+
+                do {
+                    let data = try Data(contentsOf: url)
+                    let dec = JSONDecoder()
+                    dec.dateDecodingStrategy = .iso8601
+                    let loaded = try dec.decode(PromptsState.self, from: data)
+
+                    DispatchQueue.main.async {
+                        self.dailyItems        = loaded.dailyItems
+                        self.weeklyItems       = loaded.weeklyItems
+                        self.workItems         = loaded.workItems
+                        self.monthlyItems      = loaded.monthlyItems
+                        self.yearlyItems       = loaded.yearlyItems
+                        self.eventsItems       = loaded.eventsItems
+                        self.studyItems        = loaded.studyItems
+                        self.mentalHealthItems = loaded.mentalHealthItems
+                        cont.resume()
+                    }
+
+                } catch {
+                    DispatchQueue.main.async {
+                        #if DEBUG
+                        print("❌ PromptsView loadFromDiskSafely failed: \(error)")
+                        print("   → Bundle: \(Bundle.main.bundleIdentifier ?? "nil")")
+                        print("   → File: \(url.path)")
+                        #endif
+                        // IMPORTANT: do NOT clobber current state with empty on decode failure
+                        cont.resume()
+                    }
                 }
             }
         }
@@ -794,13 +774,26 @@ struct PromptsView: View {
             studyItems:        studyItems,
             mentalHealthItems: mentalHealthItems
         )
+
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let url = docs.appendingPathComponent("prompts.json")
+
         let enc = JSONEncoder()
         enc.outputFormatting = [.withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
-        if let data = try? enc.encode(state) {
-            try? data.write(to: url, options: .atomic)
+
+        do {
+            let data = try enc.encode(state)
+            try data.write(to: url, options: .atomic)
+
+            #if DEBUG
+            print("💾 PromptsView saved prompts.json (\(data.count) bytes)")
+            #endif
+        } catch {
+            #if DEBUG
+            print("❌ PromptsView saveToDisk failed: \(error)")
+            print("   → File: \(url.path)")
+            #endif
         }
     }
 
@@ -827,4 +820,3 @@ struct PromptsView: View {
 #Preview {
     PromptsView()
 }
-

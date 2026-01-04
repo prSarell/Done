@@ -1,8 +1,10 @@
+// File: Done/ViewModels/TimerNotesViewModel.swift
 import Foundation
 import Combine
 
 @MainActor
 final class TimerNotesViewModel: ObservableObject {
+
     @Published private(set) var notes: [TimerNote] = [] {
         didSet {
             #if DEBUG
@@ -13,14 +15,18 @@ final class TimerNotesViewModel: ObservableObject {
 
     private let store = PersistedStore<TimerNote>(filename: "timer_notes.json")
     private var cancellables = Set<AnyCancellable>()
+    private var hasFinishedInitialLoad = false
 
     init() {
         #if DEBUG
         print("🟡 TimerNotesViewModel init: loading notes…")
+        print("   → Bundle: \(Bundle.main.bundleIdentifier ?? "nil")")
         #endif
 
-        // Load from disk
+        // Load from disk (do NOT trigger autosave from this)
         notes = store.load()
+
+        hasFinishedInitialLoad = true
 
         #if DEBUG
         print("🟢 TimerNotesViewModel init: loaded \(notes.count) notes")
@@ -28,15 +34,29 @@ final class TimerNotesViewModel: ObservableObject {
 
         // Autosave whenever notes change (debounced)
         $notes
-            .dropFirst() // ignore initial load
+            .dropFirst() // ignore initial assignment to @Published
             .debounce(for: .milliseconds(250), scheduler: DispatchQueue.main)
             .sink { [weak self] newNotes in
+                guard let self else { return }
+                guard self.hasFinishedInitialLoad else { return }
+
                 #if DEBUG
                 print("💾 TimerNotesViewModel autosave triggered, count = \(newNotes.count)")
                 #endif
-                self?.store.save(newNotes)
+
+                self.store.save(newNotes)
             }
             .store(in: &cancellables)
+    }
+
+    // MARK: - Debug / Utilities
+
+    /// Optional: force an immediate save (useful when debugging persistence)
+    func saveNow() {
+        #if DEBUG
+        print("💾 TimerNotesViewModel.saveNow() called, count = \(notes.count)")
+        #endif
+        store.save(notes)
     }
 
     // MARK: - Mutations

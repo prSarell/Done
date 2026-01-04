@@ -30,16 +30,18 @@ public struct PromptRule: Codable, Equatable {
     public var oneOff: Bool?
     public var windowMinutes: Int = 120 // active window centered on time (default ±60m)
 
-    public init(timeHour: Int? = nil,
-                timeMinute: Int? = nil,
-                weekday: Weekday? = nil,
-                date: Date? = nil,
-                oneOff: Bool? = nil,
-                windowMinutes: Int = 120,
-                month: Int? = nil,
-                day: Int? = nil,
-                monthlyDay: Int? = nil,
-                monthlyIsLastDay: Bool? = nil) {
+    public init(
+        timeHour: Int? = nil,
+        timeMinute: Int? = nil,
+        weekday: Weekday? = nil,
+        date: Date? = nil,
+        oneOff: Bool? = nil,
+        windowMinutes: Int = 120,
+        month: Int? = nil,
+        day: Int? = nil,
+        monthlyDay: Int? = nil,
+        monthlyIsLastDay: Bool? = nil
+    ) {
         self.timeHour = timeHour
         self.timeMinute = timeMinute
         self.weekday = weekday
@@ -64,7 +66,7 @@ public struct PromptRule: Codable, Equatable {
         // Time window gate: if time set, enforce ±window/2 around that time today
         if let h = timeHour, let m = timeMinute {
             guard let center = cal.date(bySettingHour: h, minute: m, second: 0, of: now) else { return false }
-            let half = TimeInterval(windowMinutes / 2 * 60)
+            let half = TimeInterval((windowMinutes / 2) * 60)
             let start = center.addingTimeInterval(-half)
             let end   = center.addingTimeInterval(+half)
             return (now >= start && now <= end)
@@ -77,8 +79,8 @@ public struct PromptRule: Codable, Equatable {
 
     // Should be auto-removed after the assigned date?
     public func shouldAutoDelete(after now: Date, calendar cal: Calendar = .current) -> Bool {
-        let treatAs = (oneOff ?? (date != nil))
-        guard treatAs, let d = date else { return false }
+        let treatAsOneOff = (oneOff ?? (date != nil))
+        guard treatAsOneOff, let d = date else { return false }
         // Delete once the day has fully passed (midnight after 'date')
         return now > cal.startOfDay(for: d).addingTimeInterval(24 * 60 * 60)
     }
@@ -88,18 +90,62 @@ public struct PromptRule: Codable, Equatable {
 public enum PromptRulesStore {
     private static let filename = "prompt_rules.json"
 
-    public static func load() -> [String: PromptRule] {
+    private static var fileURL: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let url = docs.appendingPathComponent(filename)
-        guard let data = try? Data(contentsOf: url) else { return [:] }
-        return (try? JSONDecoder().decode([String: PromptRule].self, from: data)) ?? [:]
+        return docs.appendingPathComponent(filename)
+    }
+
+    public static func load() -> [String: PromptRule] {
+        do {
+            if !FileManager.default.fileExists(atPath: fileURL.path) {
+                #if DEBUG
+                print("📂 PromptRulesStore: No file at \(fileURL.path), returning empty rules")
+                #endif
+                return [:]
+            }
+
+            let data = try Data(contentsOf: fileURL)
+
+            let dec = JSONDecoder()
+            dec.dateDecodingStrategy = .iso8601
+
+            let decoded = try dec.decode([String: PromptRule].self, from: data)
+
+            #if DEBUG
+            print("📦 PromptRulesStore: Loaded \(decoded.count) rules (\(data.count) bytes)")
+            print("   → File: \(fileURL.path)")
+            #endif
+
+            return decoded
+
+        } catch {
+            #if DEBUG
+            print("❌ PromptRulesStore load error: \(error)")
+            print("   → File: \(fileURL.path)")
+            #endif
+            return [:]
+        }
     }
 
     public static func save(_ rules: [String: PromptRule]) {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let url = docs.appendingPathComponent(filename)
-        if let data = try? JSONEncoder().encode(rules) {
-            try? data.write(to: url, options: .atomic)
+        do {
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.withoutEscapingSlashes]
+            enc.dateEncodingStrategy = .iso8601
+
+            let data = try enc.encode(rules)
+            try data.write(to: fileURL, options: [.atomic])
+
+            #if DEBUG
+            print("💾 PromptRulesStore: Saved \(rules.count) rules (\(data.count) bytes)")
+            print("   → File: \(fileURL.path)")
+            #endif
+
+        } catch {
+            #if DEBUG
+            print("❌ PromptRulesStore save error: \(error)")
+            print("   → File: \(fileURL.path)")
+            #endif
         }
     }
 }

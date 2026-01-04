@@ -35,11 +35,13 @@ final class RandomPromptScheduler {
     private init() {}
 
     // MARK: - History (avoid repeats + cancel old plan)
+
     private struct History: Codable {
-        var lastShown: [UUID: Date] = [:]   // prompt id -> last shown date
-        var lastPlanDate: String? = nil     // "yyyy-MM-dd"
-        var pendingIDs: [String] = []       // identifiers scheduled for today (so we can cancel if needed)
-        var lastText: String? = nil         // last text we scheduled (avoid immediate duplicate)
+        /// Use String keys for stable Codable (UUID dictionary keys are fragile across environments)
+        var lastShown: [String: Date] = [:]     // prompt UUID string -> last shown date
+        var lastPlanDate: String? = nil         // "yyyy-MM-dd"
+        var pendingIDs: [String] = []           // identifiers scheduled for today (so we can cancel if needed)
+        var lastText: String? = nil             // last text we scheduled (avoid immediate duplicate)
     }
 
     private var historyURL: URL {
@@ -47,26 +49,92 @@ final class RandomPromptScheduler {
         return docs.appendingPathComponent("random_prompt_history.json")
     }
 
+    // MARK: - Re-entrancy guard / throttle
+
+    private let refreshLock = NSLock()
+    private var isRefreshing: Bool = false
+    private var lastRefreshAt: Date? = nil
+
     // MARK: - Entry point
 
     /// Call on app launch / when prompts change. Plans *today’s* notifications once.
-    func refreshScheduleToday(allPrompts: [PromptItem], rules: RandomPromptRules = .init(), forceRebuild: Bool = false) {
+    func refreshScheduleToday(
+        allPrompts: [PromptItem],
+        rules: RandomPromptRules = .init(),
+        forceRebuild: Bool = false
+    ) {
         guard !allPrompts.isEmpty else { return }
 
+        // Prevent overlapping refresh calls (you were clearly getting multiple rapid calls)
+        refreshLock.lock()
+        if isRefreshing {
+            refreshLock.unlock()
+            return
+        }
+        isRefreshing = true
+
+        // Tiny throttle to avoid "spam refresh" loops
+        let nowForThrottle = Date()
+        if let last = lastRefreshAt, nowForThrottle.timeIntervalSince(last) < 0.5 {
+            isRefreshing = false
+            refreshLock.unlock()
+            return
+        }
+        lastRefreshAt = nowForThrottle
+        refreshLock.unlock()
+
+        let now = Date()
+        let cal = Calendar.current
+        let todayKey = Self.dayKey(now)
+
         var history = loadHistory()
-        let todayKey = Self.dayKey(Date())
 
         // Plan only once per calendar day, unless forceRebuild is true
-        if !forceRebuild, history.lastPlanDate == todayKey { return }
+        if !forceRebuild, history.lastPlanDate == todayKey {
+            finishRefresh()
+            return
+        }
 
-        // Cancel any pending plan from a previous run so we can rebuild fresh
+        // Cancel any pending plan we know about
         if !history.pendingIDs.isEmpty {
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: history.pendingIDs)
             history.pendingIDs.removeAll()
         }
 
-        let now = Date()
-        let cal = Calendar.current
+        // Belt + braces:
+        // If history was missing/corrupt before, we may have old rand-* requests queued.
+        // Remove all pending rand- requests so we don’t stack duplicates.
+        UNUserNotificationCenter.current().getPendingNotificationRequests { reqs in
+            let randIDs = reqs
+                .map(\.identifier)
+                .filter { $0.hasPrefix("rand-") }
+            if !randIDs.isEmpty {
+                UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: randIDs)
+            }
+
+            // Continue planning after cleanup
+            self.planNow(
+                allPrompts: allPrompts,
+                rules: rules,
+                history: history,
+                todayKey: todayKey,
+                now: now,
+                cal: cal
+            )
+        }
+    }
+
+    // MARK: - Planning core (runs after async pending fetch)
+
+    private func planNow(
+        allPrompts: [PromptItem],
+        rules: RandomPromptRules,
+        history: History,
+        todayKey: String,
+        now: Date,
+        cal: Calendar
+    ) {
+        var history = history
 
         // Filter candidates (non-empty text)
         var candidates = allPrompts.filter {
@@ -74,20 +142,15 @@ final class RandomPromptScheduler {
         }
 
         // Optional cross-day suppression:
-        // Only apply this if noRepeatDays > 0. With the default 0, prompts
-        // are allowed to appear multiple times per day and across days,
-        // with only the immediate duplicate protection still in place.
         if rules.noRepeatDays > 0 {
             let cutoff = cal.date(byAdding: .day, value: -rules.noRepeatDays, to: now) ?? now
             candidates.removeAll { p in
-                if let d = history.lastShown[p.id] {
+                if let d = history.lastShown[p.id.uuidString] {
                     return d > cutoff
                 }
                 return false
             }
-            if candidates.isEmpty {
-                candidates = allPrompts
-            }
+            if candidates.isEmpty { candidates = allPrompts }
         }
 
         // Build today’s window
@@ -97,13 +160,14 @@ final class RandomPromptScheduler {
         else {
             history.lastPlanDate = todayKey
             saveHistory(history)
+            finishRefresh()
             return
         }
 
         let start = max(start0, now)
         let end = end0 <= start ? start.addingTimeInterval(3600) : end0 // guard against inverted window
 
-        // Generate 20-min slots from "next slot after now" up to end, capped at 64
+        // Generate slots from "next slot after now" up to end, capped at 64
         let times = Self.generateEveryInterval(
             start: start,
             end: end,
@@ -114,20 +178,18 @@ final class RandomPromptScheduler {
         guard !times.isEmpty else {
             history.lastPlanDate = todayKey
             saveHistory(history)
+            finishRefresh()
             return
         }
 
-        // Deterministic pool shuffle (kept from your version)
-        let seedInt = todayKey.hashValue ^ candidates.count          // Int
-        let seed = UInt64(bitPattern: Int64(seedInt))                // Int -> Int64 -> UInt64
-
+        // Deterministic pool shuffle
+        let seedInt = todayKey.hashValue ^ candidates.count
+        let seed = UInt64(bitPattern: Int64(seedInt))
         var rng = SeededRandom(seed: seed)
         var pool = candidates
         pool.shuffle(using: &rng)
 
-
-
-        // load per-prompt temporal rules once
+        // Load per-prompt temporal rules once
         let perPromptRules = PromptRulesStore.load()
 
         var scheduledIDs: [String] = []
@@ -135,21 +197,23 @@ final class RandomPromptScheduler {
         var scheduledCount = 0
 
         for (i, time) in times.enumerated() {
-            // filter eligible prompts *for this exact fire time* by rules
             let eligible = PromptSelector.eligible(from: pool, rules: perPromptRules, at: time, cal: cal)
 
-            // Pick next avoiding immediate duplicate; if no eligible, skip this slot
-            guard let next = pickNextPrompt(fromEligible: eligible, lastText: lastText, fallback: pool, rng: &rng) else {
+            guard let next = pickNextPrompt(fromEligible: eligible, lastText: lastText, rng: &rng) else {
                 continue
             }
 
             lastText = next.text
 
+            // Stable deterministic ID per slot (includes yyyyMMdd-HHmm + slot index + prompt UUID)
+            // Note: minute-based to keep IDs stable even if seconds jitter changes a bit.
             let id = notifID(for: next.id, on: time, index: i)
+
             NotificationsManager.shared.scheduleOneOff(id: id, title: next.text, at: time)
             scheduledIDs.append(id)
 
-            history.lastShown[next.id] = now
+            // Track last shown (use actual planned fire time, not "now")
+            history.lastShown[next.id.uuidString] = time
             scheduledCount += 1
         }
 
@@ -159,80 +223,100 @@ final class RandomPromptScheduler {
         saveHistory(history)
 
         print("RPS: planned \(scheduledCount) notifications at ~every \(rules.intervalMinutes)m between \(start)–\(end)")
+
+        finishRefresh()
     }
 
     // MARK: - Pick helper (avoid immediate duplicate; respects eligibility)
-    private func pickNextPrompt(fromEligible eligible: [PromptItem],
-                                lastText: String?,
-                                fallback: [PromptItem],
-                                rng: inout SeededRandom) -> PromptItem? {
-        // Nothing eligible at this moment -> skip this slot
-        guard !eligible.isEmpty else {
-            return nil
+
+    private func pickNextPrompt(
+        fromEligible eligible: [PromptItem],
+        lastText: String?,
+        rng: inout SeededRandom
+    ) -> PromptItem? {
+        guard !eligible.isEmpty else { return nil }
+
+        if let lastText, eligible.count > 1 {
+            let filtered = eligible.filter { $0.text != lastText }
+            if let chosen = filtered.randomElement(using: &rng) {
+                return chosen
+            }
         }
 
-        // Prefer a prompt whose text differs from the last one we scheduled,
-        // so we avoid back-to-back duplicates like "Get Milk, Get Milk".
-        if let lastText,
-           let nonRepeat = eligible.first(where: { $0.text != lastText }) {
-            return nonRepeat
-        }
-
-        // Otherwise just pick any eligible prompt at random.
-        return eligible.randomElement(using: &rng) ?? eligible.first ?? fallback.randomElement(using: &rng)
+        return eligible.randomElement(using: &rng) ?? eligible.first
     }
 
     // MARK: - IDs / History IO
 
     private func notifID(for id: UUID, on date: Date, index: Int) -> String {
-        let df = DateFormatter(); df.dateFormat = "yyyyMMdd-HHmm"
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd-HHmm"
         return "rand-\(df.string(from: date))-\(index)-\(id.uuidString)"
     }
 
     private func loadHistory() -> History {
         do {
             let data = try Data(contentsOf: historyURL)
-            return try JSONDecoder().decode(History.self, from: data)
-        } catch { return History() }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(History.self, from: data)
+        } catch {
+            #if DEBUG
+            print("RPS: loadHistory failed (starting fresh): \(error)")
+            #endif
+            return History()
+        }
     }
 
     private func saveHistory(_ h: History) {
         do {
-            let data = try JSONEncoder().encode(h)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(h)
             try data.write(to: historyURL, options: .atomic)
-        } catch { /* ignore for WIP */ }
+        } catch {
+            #if DEBUG
+            print("RPS: saveHistory failed: \(error)")
+            print("   → File: \(historyURL.path)")
+            #endif
+        }
+    }
+
+    private func finishRefresh() {
+        refreshLock.lock()
+        isRefreshing = false
+        refreshLock.unlock()
     }
 
     private static func dayKey(_ date: Date) -> String {
-        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
         return df.string(from: date)
     }
 
     // MARK: - Time generation (every N minutes, jittered, cap 64)
 
-    private static func generateEveryInterval(start: Date,
-                                              end: Date,
-                                              intervalMinutes: Int,
-                                              jitterMinutes: Int) -> [Date] {
+    private static func generateEveryInterval(
+        start: Date,
+        end: Date,
+        intervalMinutes: Int,
+        jitterMinutes: Int
+    ) -> [Date] {
         guard intervalMinutes > 0, end > start else { return [] }
 
-        // Align the first slot to the next interval boundary after 'start'
         let interval = Double(intervalMinutes * 60)
         let jitter   = Double(max(0, jitterMinutes) * 60)
 
         var out: [Date] = []
         var t = alignedNext(after: start, step: interval)
 
-        while t <= end && out.count < 64 { // iOS pending cap safety
-            // Apply small jitter within bounds (±jitter)
+        while t <= end && out.count < 64 {
             let j = jitter > 0 ? Double.random(in: -jitter...jitter) : 0
             var candidate = t.addingTimeInterval(j)
 
-            // Keep inside [start, end]
             if candidate < start { candidate = start }
             if candidate > end { candidate = end }
 
-            // Ensure chronological order (monotonic)
             if let last = out.last, candidate <= last {
                 candidate = last.addingTimeInterval(interval)
                 if candidate > end { break }
