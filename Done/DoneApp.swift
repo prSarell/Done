@@ -3,6 +3,7 @@
 // - App entry point
 // - Provides TimerNotesViewModel as an EnvironmentObject
 // - Requests notification permissions
+// - Registers notification categories + delegate for Done/Skip actions
 // - Performs one-off prompt cleanup WITHOUT risking overwriting prompts.json on load/decode failure
 // - Loads prompts from disk and refreshes today's random schedule
 // - Prevents repeated scheduling spam by gating "plan today" to once per foreground session
@@ -15,8 +16,19 @@ import UIKit
 struct DoneApp: App {
     @StateObject private var notesVM = TimerNotesViewModel()
 
+    // ✅ Add delegate instance (must be strongly held)
+    private let notifDelegate = PromptNotificationDelegate()
+
     // Gate scheduling so we don't spam-refresh during launch / permission prompts
     @State private var didPlanThisForeground = false
+
+    // ✅ Use init to set delegate + register categories once
+    init() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = notifDelegate
+
+        NotificationsManager.shared.registerCategories()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -61,6 +73,7 @@ struct DoneApp: App {
 private struct PromptsState: Codable {
     var dailyItems:        [PromptItem] = []
     var weeklyItems:       [PromptItem] = []
+    var workItems:         [PromptItem] = []   // ✅ IMPORTANT: you have Work in PromptsView
     var monthlyItems:      [PromptItem] = []
     var yearlyItems:       [PromptItem] = []
     var eventsItems:       [PromptItem] = []
@@ -78,8 +91,14 @@ private func loadAllPromptsFromDisk() -> [PromptItem] {
         return []
     }
 
-    return s.dailyItems + s.weeklyItems + s.monthlyItems + s.yearlyItems +
-           s.eventsItems + s.studyItems + s.mentalHealthItems
+    return s.dailyItems
+         + s.weeklyItems
+         + s.workItems            // ✅ include work
+         + s.monthlyItems
+         + s.yearlyItems
+         + s.eventsItems
+         + s.studyItems
+         + s.mentalHealthItems
 }
 
 /// Safe loader:
@@ -168,6 +187,7 @@ private func performOneOffCleanup() {
 
     state.dailyItems        = filter(state.dailyItems)
     state.weeklyItems       = filter(state.weeklyItems)
+    state.workItems         = filter(state.workItems)   // ✅ cleanup work too
     state.monthlyItems      = filter(state.monthlyItems)
     state.yearlyItems       = filter(state.yearlyItems)
     state.eventsItems       = filter(state.eventsItems)

@@ -1,10 +1,3 @@
-//
-//  NotificationsManager.swift
-//  Done
-//
-//  Created by Patrick Sarell on 23/8/2025.
-//
-
 import Foundation
 import UserNotifications
 
@@ -12,7 +5,6 @@ final class NotificationsManager {
     static let shared = NotificationsManager()
     private init() {}
 
-    // Ask once at app launch
     func requestAuthorization() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, err in
             if let err = err {
@@ -23,7 +15,33 @@ final class NotificationsManager {
         }
     }
 
-    /// Schedule a repeating daily notification at a specific time (hour/minute).
+    // ✅ ADD THIS
+    func registerCategories() {
+        let done = UNNotificationAction(
+            identifier: PromptNotificationDelegate.actionDoneID,
+            title: "Done!",
+            options: []
+        )
+        let skip = UNNotificationAction(
+            identifier: PromptNotificationDelegate.actionSkipID,
+            title: "Skip",
+            options: []
+        )
+
+        let cat = UNNotificationCategory(
+            identifier: PromptNotificationDelegate.categoryID,
+            actions: [done, skip],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        UNUserNotificationCenter.current().setNotificationCategories([cat])
+
+        #if DEBUG
+        print("🔧 NotificationsManager: registered prompt action category")
+        #endif
+    }
+
     func scheduleDaily(id: String, title: String, time: Date) {
         let comps = Calendar.current.dateComponents([.hour, .minute], from: time)
 
@@ -43,13 +61,22 @@ final class NotificationsManager {
         }
     }
 
-    /// Schedule a one-off (non-repeating) notification at an exact date/time.
-    func scheduleOneOff(id: String, title: String, at date: Date) {
+    // ✅ UPDATE SIGNATURE (backwards compatible default params)
+    func scheduleOneOff(
+        id: String,
+        title: String,
+        at date: Date,
+        userInfo: [AnyHashable: Any]? = nil,
+        categoryID: String? = nil
+    ) {
         let comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
 
         let content = UNMutableNotificationContent()
         content.title = title
         content.sound = .default
+
+        if let userInfo { content.userInfo = userInfo }
+        if let categoryID { content.categoryIdentifier = categoryID }
 
         let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
         let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
@@ -63,19 +90,8 @@ final class NotificationsManager {
         }
     }
 
-    /// Cancel any pending or delivered notifications with the given id.
     func cancel(id: String) {
-        UNUserNotificationCenter.current()
-            .removePendingNotificationRequests(withIdentifiers: [id])
-        UNUserNotificationCenter.current()
-            .removeDeliveredNotifications(withIdentifiers: [id])
-    }
-
-    // MARK: - Debug helper to confirm notifications work
-    /// Schedules a test notification 30 seconds from now.
-    func debugTestNotification() {
-        let date = Date().addingTimeInterval(30)
-        scheduleOneOff(id: "testNotification", title: "✅ Done! Test Notification", at: date)
-        print("Debug test notification scheduled for:", date)
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [id])
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
     }
 }
