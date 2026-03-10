@@ -1,3 +1,8 @@
+//
+//  NotificationsManager.swift
+//  Done
+//
+
 import Foundation
 import UserNotifications
 
@@ -6,7 +11,9 @@ final class NotificationsManager {
     private init() {}
 
     func requestAuthorization() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, err in
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: [.alert, .sound, .badge]
+        ) { granted, err in
             if let err = err {
                 print("Notification auth error:", err)
             } else {
@@ -15,13 +22,13 @@ final class NotificationsManager {
         }
     }
 
-    // ✅ ADD THIS
     func registerCategories() {
         let done = UNNotificationAction(
             identifier: PromptNotificationDelegate.actionDoneID,
             title: "Done!",
             options: []
         )
+
         let skip = UNNotificationAction(
             identifier: PromptNotificationDelegate.actionSkipID,
             title: "Skip",
@@ -49,8 +56,16 @@ final class NotificationsManager {
         content.title = title
         content.sound = .default
 
-        let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: true)
-        let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
+        let trigger = UNCalendarNotificationTrigger(
+            dateMatching: comps,
+            repeats: true
+        )
+
+        let request = UNNotificationRequest(
+            identifier: id,
+            content: content,
+            trigger: trigger
+        )
 
         UNUserNotificationCenter.current().add(request) { err in
             if let err = err {
@@ -61,7 +76,6 @@ final class NotificationsManager {
         }
     }
 
-    // ✅ UPDATE SIGNATURE (backwards compatible default params)
     func scheduleOneOff(
         id: String,
         title: String,
@@ -69,17 +83,33 @@ final class NotificationsManager {
         userInfo: [AnyHashable: Any]? = nil,
         categoryID: String? = nil
     ) {
-        let comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        let comps = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute, .second],
+            from: date
+        )
 
         let content = UNMutableNotificationContent()
         content.title = title
         content.sound = .default
 
-        if let userInfo { content.userInfo = userInfo }
-        if let categoryID { content.categoryIdentifier = categoryID }
+        if let userInfo {
+            content.userInfo = userInfo
+        }
 
-        let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
-        let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
+        if let categoryID {
+            content.categoryIdentifier = categoryID
+        }
+
+        let trigger = UNCalendarNotificationTrigger(
+            dateMatching: comps,
+            repeats: false
+        )
+
+        let request = UNNotificationRequest(
+            identifier: id,
+            content: content,
+            trigger: trigger
+        )
 
         UNUserNotificationCenter.current().add(request) { err in
             if let err = err {
@@ -91,7 +121,38 @@ final class NotificationsManager {
     }
 
     func cancel(id: String) {
-        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [id])
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [id])
+        center.removeDeliveredNotifications(withIdentifiers: [id])
+    }
+
+    func cancelAll(prefix: String, completion: (() -> Void)? = nil) {
+        let center = UNUserNotificationCenter.current()
+
+        center.getPendingNotificationRequests { requests in
+            let pendingIDs = requests
+                .map(\.identifier)
+                .filter { $0.hasPrefix(prefix) }
+
+            if !pendingIDs.isEmpty {
+                center.removePendingNotificationRequests(withIdentifiers: pendingIDs)
+            }
+
+            center.getDeliveredNotifications { delivered in
+                let deliveredIDs = delivered
+                    .map { $0.request.identifier }
+                    .filter { $0.hasPrefix(prefix) }
+
+                if !deliveredIDs.isEmpty {
+                    center.removeDeliveredNotifications(withIdentifiers: deliveredIDs)
+                }
+
+                #if DEBUG
+                print("🔕 NotificationsManager: cancelled \(pendingIDs.count) pending + \(deliveredIDs.count) delivered for prefix '\(prefix)'")
+                #endif
+
+                completion?()
+            }
+        }
     }
 }

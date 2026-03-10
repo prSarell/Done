@@ -1,9 +1,17 @@
-// Path: Done/Storage/PromptsRules.swift
+// Path: Done/Storage/PromptRules.swift
 
 import Foundation
 
 // 1 = Sunday … 7 = Saturday (Calendar.current.weekday)
 public typealias Weekday = Int
+
+public enum PromptRecurrenceKind: String, Codable {
+    case none
+    case weekly
+    case oneOff
+    case yearly
+    case monthly
+}
 
 public struct PromptRule: Codable, Equatable {
     // Optional schedule parts
@@ -54,8 +62,9 @@ public struct PromptRule: Codable, Equatable {
         self.monthlyIsLastDay = monthlyIsLastDay
     }
 
+    // MARK: - Existing active-window logic
+
     // Is this prompt active at 'now'?
-    // NOTE: we haven’t wired monthly/yearly logic in here yet.
     public func isActive(at now: Date, calendar cal: Calendar = .current) -> Bool {
         // Date gate: if date set, only that calendar day
         if let d = date, !cal.isDate(now, inSameDayAs: d) { return false }
@@ -83,6 +92,221 @@ public struct PromptRule: Codable, Equatable {
         guard treatAsOneOff, let d = date else { return false }
         // Delete once the day has fully passed (midnight after 'date')
         return now > cal.startOfDay(for: d).addingTimeInterval(24 * 60 * 60)
+    }
+}
+
+// MARK: - Scheduler helpers
+
+public extension PromptRule {
+    var recurrenceKind: PromptRecurrenceKind {
+        let treatAsOneOff = (oneOff ?? (date != nil))
+
+        if treatAsOneOff, date != nil {
+            return .oneOff
+        }
+        if weekday != nil {
+            return .weekly
+        }
+        if month != nil, day != nil {
+            return .yearly
+        }
+        if monthlyDay != nil || (monthlyIsLastDay ?? false) {
+            return .monthly
+        }
+        return .none
+    }
+
+    var hasSchedulingRule: Bool {
+        recurrenceKind != .none
+    }
+
+    func nextTarget(after now: Date, calendar cal: Calendar = .current) -> Date? {
+        switch recurrenceKind {
+        case .none:
+            return nil
+
+        case .oneOff:
+            guard let d = date else { return nil }
+            let target = targetDate(forBaseDay: d, calendar: cal)
+            return (target >= now) ? target : nil
+
+        case .weekly:
+            guard let wd = weekday else { return nil }
+
+            let thisWeekTarget = targetForWeekday(wd, relativeTo: now, calendar: cal)
+            if thisWeekTarget >= now {
+                return thisWeekTarget
+            }
+
+            guard let nextWeekBase = cal.date(byAdding: .day, value: 7, to: thisWeekTarget) else {
+                return nil
+            }
+            return nextWeekBase
+
+        case .monthly:
+            return nextMonthlyTarget(after: now, calendar: cal)
+
+        case .yearly:
+            return nextYearlyTarget(after: now, calendar: cal)
+        }
+    }
+
+    func previousTarget(before now: Date, calendar cal: Calendar = .current) -> Date? {
+        switch recurrenceKind {
+        case .none:
+            return nil
+
+        case .oneOff:
+            guard let d = date else { return nil }
+            let target = targetDate(forBaseDay: d, calendar: cal)
+            return (target <= now) ? target : nil
+
+        case .weekly:
+            guard let wd = weekday else { return nil }
+            let thisWeekTarget = targetForWeekday(wd, relativeTo: now, calendar: cal)
+            if thisWeekTarget <= now {
+                return thisWeekTarget
+            }
+            return cal.date(byAdding: .day, value: -7, to: thisWeekTarget)
+
+        case .monthly:
+            return previousMonthlyTarget(before: now, calendar: cal)
+
+        case .yearly:
+            return previousYearlyTarget(before: now, calendar: cal)
+        }
+    }
+
+    func leadInStart(for target: Date, now: Date, calendar cal: Calendar = .current) -> Date {
+        switch recurrenceKind {
+        case .none:
+            return target
+
+        case .weekly:
+            return cal.startOfDay(for: target)
+
+        case .monthly:
+            return cal.date(byAdding: .day, value: -5, to: cal.startOfDay(for: target))
+                ?? cal.startOfDay(for: target)
+
+        case .yearly:
+            return cal.date(byAdding: .day, value: -30, to: cal.startOfDay(for: target))
+                ?? cal.startOfDay(for: target)
+
+        case .oneOff:
+            let daysAway = cal.dateComponents([.day], from: now, to: target).day ?? 0
+
+            if daysAway > 60 {
+                return cal.date(byAdding: .day, value: -30, to: cal.startOfDay(for: target))
+                    ?? cal.startOfDay(for: target)
+            } else if daysAway > 7 {
+                return cal.date(byAdding: .day, value: -7, to: cal.startOfDay(for: target))
+                    ?? cal.startOfDay(for: target)
+            } else {
+                return cal.startOfDay(for: now)
+            }
+        }
+    }
+}
+
+// MARK: - Internal helpers
+
+private extension PromptRule {
+    func targetDate(forBaseDay baseDay: Date, calendar cal: Calendar) -> Date {
+        if let h = timeHour, let m = timeMinute,
+           let dated = cal.date(bySettingHour: h, minute: m, second: 0, of: baseDay) {
+            return dated
+        }
+
+        let start = cal.startOfDay(for: baseDay)
+        return start.addingTimeInterval((24 * 60 * 60) - 1) // end of day
+    }
+
+    func targetForWeekday(_ weekday: Int, relativeTo now: Date, calendar cal: Calendar) -> Date {
+        let nowWeekday = cal.component(.weekday, from: now)
+        let delta = weekday - nowWeekday
+        let targetDay = cal.date(byAdding: .day, value: delta, to: now) ?? now
+        return targetDate(forBaseDay: targetDay, calendar: cal)
+    }
+
+    func nextMonthlyTarget(after now: Date, calendar cal: Calendar) -> Date? {
+        for offset in 0...24 {
+            guard let monthDate = cal.date(byAdding: .month, value: offset, to: now) else { continue }
+            if let candidate = monthlyTarget(inMonthContaining: monthDate, calendar: cal), candidate >= now {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    func previousMonthlyTarget(before now: Date, calendar cal: Calendar) -> Date? {
+        for offset in 0...24 {
+            guard let monthDate = cal.date(byAdding: .month, value: -offset, to: now) else { continue }
+            if let candidate = monthlyTarget(inMonthContaining: monthDate, calendar: cal), candidate <= now {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    func monthlyTarget(inMonthContaining date: Date, calendar cal: Calendar) -> Date? {
+        var comps = cal.dateComponents([.year, .month], from: date)
+
+        let resolvedDay: Int
+        if monthlyIsLastDay == true {
+            guard let range = cal.range(of: .day, in: .month, for: date) else { return nil }
+            resolvedDay = range.count
+        } else if let monthlyDay {
+            guard let range = cal.range(of: .day, in: .month, for: date) else { return nil }
+            resolvedDay = min(monthlyDay, range.count)
+        } else {
+            return nil
+        }
+
+        comps.day = resolvedDay
+
+        guard let baseDay = cal.date(from: comps) else { return nil }
+        return targetDate(forBaseDay: baseDay, calendar: cal)
+    }
+
+    func nextYearlyTarget(after now: Date, calendar cal: Calendar) -> Date? {
+        let currentYear = cal.component(.year, from: now)
+
+        for year in currentYear...(currentYear + 10) {
+            if let candidate = yearlyTarget(year: year, calendar: cal), candidate >= now {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    func previousYearlyTarget(before now: Date, calendar cal: Calendar) -> Date? {
+        let currentYear = cal.component(.year, from: now)
+
+        for year in stride(from: currentYear, through: currentYear - 10, by: -1) {
+            if let candidate = yearlyTarget(year: year, calendar: cal), candidate <= now {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    func yearlyTarget(year: Int, calendar cal: Calendar) -> Date? {
+        guard let month, let day else { return nil }
+
+        var comps = DateComponents()
+        comps.year = year
+        comps.month = month
+
+        if let firstOfMonth = cal.date(from: DateComponents(year: year, month: month)),
+           let range = cal.range(of: .day, in: .month, for: firstOfMonth) {
+            comps.day = min(day, range.count)
+        } else {
+            comps.day = day
+        }
+
+        guard let baseDay = cal.date(from: comps) else { return nil }
+        return targetDate(forBaseDay: baseDay, calendar: cal)
     }
 }
 
