@@ -63,19 +63,38 @@ final class RandomPromptScheduler {
         rules: RandomPromptRules = .init(),
         forceRebuild: Bool = false
     ) {
-        guard !allPrompts.isEmpty else { return }
+        #if DEBUG
+        print("RPS: refreshScheduleToday called with \(allPrompts.count) prompts | forceRebuild=\(forceRebuild)")
+        #endif
 
-        // Prevent overlapping refresh calls (you were clearly getting multiple rapid calls)
+        // Scheduled/date-driven prompts are handled by their own scheduler.
+        ScheduledPromptScheduler.shared.refreshSchedule(prompts: allPrompts)
+
+        guard !allPrompts.isEmpty else {
+            #if DEBUG
+            print("RPS: no prompts supplied, skipping random plan rebuild")
+            #endif
+            finishRefresh()
+            return
+        }
+
+        // Prevent overlapping refresh calls
         refreshLock.lock()
         if isRefreshing {
+            #if DEBUG
+            print("RPS: skipped refresh because a refresh is already in progress")
+            #endif
             refreshLock.unlock()
             return
         }
         isRefreshing = true
 
-        // Tiny throttle to avoid "spam refresh" loops
+        // Tiny throttle to avoid spam refresh loops
         let nowForThrottle = Date()
         if let last = lastRefreshAt, nowForThrottle.timeIntervalSince(last) < 0.5 {
+            #if DEBUG
+            print("RPS: throttled refresh (\(nowForThrottle.timeIntervalSince(last))s since last)")
+            #endif
             isRefreshing = false
             refreshLock.unlock()
             return
@@ -91,6 +110,9 @@ final class RandomPromptScheduler {
 
         // Plan only once per calendar day, unless forceRebuild is true
         if !forceRebuild, history.lastPlanDate == todayKey {
+            #if DEBUG
+            print("RPS: random plan already exists for today, not rebuilding")
+            #endif
             finishRefresh()
             return
         }
@@ -103,11 +125,12 @@ final class RandomPromptScheduler {
 
         // Belt + braces:
         // If history was missing/corrupt before, we may have old rand-* requests queued.
-        // Remove all pending rand- requests so we don’t stack duplicates.
+        // Remove all pending rand-* requests so we don’t stack duplicates.
         UNUserNotificationCenter.current().getPendingNotificationRequests { reqs in
             let randIDs = reqs
                 .map(\.identifier)
                 .filter { $0.hasPrefix("rand-") }
+
             if !randIDs.isEmpty {
                 UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: randIDs)
             }
@@ -136,10 +159,38 @@ final class RandomPromptScheduler {
     ) {
         var history = history
 
-        // Filter candidates (non-empty text)
-        var candidates = allPrompts.filter {
-            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let perPromptRules = PromptRulesStore.load()
+
+        // Filter candidates:
+        // 1. non-empty text
+        // 2. EXCLUDE prompts with a valid scheduling rule
+        //    (scheduled prompts belong only to ScheduledPromptScheduler)
+        // 3. KEEP prompts with no rule, or malformed/incomplete rule
+        //    so they don't disappear from both systems
+        var candidates = allPrompts.filter { prompt in
+            let trimmed = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return false }
+
+            guard let rule = perPromptRules[prompt.text] else {
+                return true // no rule -> stays in random pool
+            }
+
+            if rule.hasSchedulingRule {
+                #if DEBUG
+                print("RPS: excluding scheduled prompt from random pool -> '\(prompt.text)' (\(rule.recurrenceKind.rawValue))")
+                #endif
+                return false
+            }
+
+            #if DEBUG
+            print("RPS: keeping prompt with non-schedulable rule in random pool -> '\(prompt.text)'")
+            #endif
+            return true
         }
+
+        #if DEBUG
+        print("RPS: \(candidates.count) prompts remain in random pool after excluding scheduled prompts")
+        #endif
 
         // Optional cross-day suppression:
         if rules.noRepeatDays > 0 {
@@ -150,7 +201,32 @@ final class RandomPromptScheduler {
                 }
                 return false
             }
-            if candidates.isEmpty { candidates = allPrompts }
+            if candidates.isEmpty {
+                candidates = allPrompts.filter { prompt in
+                    let trimmed = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return false }
+
+                    guard let rule = perPromptRules[prompt.text] else {
+                        return true
+                    }
+
+                    return !rule.hasSchedulingRule
+                }
+            }
+        }
+
+        #if DEBUG
+        print("RPS: \(candidates.count) prompts available after repeat suppression")
+        #endif
+
+        guard !candidates.isEmpty else {
+            #if DEBUG
+            print("RPS: no candidates available for random scheduling")
+            #endif
+            history.lastPlanDate = todayKey
+            saveHistory(history)
+            finishRefresh()
+            return
         }
 
         // Build today’s window
@@ -165,7 +241,7 @@ final class RandomPromptScheduler {
         }
 
         let start = max(start0, now)
-        let end = end0 <= start ? start.addingTimeInterval(3600) : end0 // guard against inverted window
+        let end = end0 <= start ? start.addingTimeInterval(3600) : end0
 
         // Generate slots from "next slot after now" up to end, capped at 64
         let times = Self.generateEveryInterval(
@@ -189,9 +265,6 @@ final class RandomPromptScheduler {
         var pool = candidates
         pool.shuffle(using: &rng)
 
-        // Load per-prompt temporal rules once
-        let perPromptRules = PromptRulesStore.load()
-
         var scheduledIDs: [String] = []
         var lastText = history.lastText
         var scheduledCount = 0
@@ -205,8 +278,7 @@ final class RandomPromptScheduler {
 
             lastText = next.text
 
-            // Stable deterministic ID per slot (includes yyyyMMdd-HHmm + slot index + prompt UUID)
-            // Note: minute-based to keep IDs stable even if seconds jitter changes a bit.
+            // Stable deterministic ID per slot
             let id = notifID(for: next.id, on: time, index: i)
 
             NotificationsManager.shared.scheduleOneOff(id: id, title: next.text, at: time)
@@ -222,7 +294,9 @@ final class RandomPromptScheduler {
         history.lastText = lastText
         saveHistory(history)
 
-        print("RPS: planned \(scheduledCount) notifications at ~every \(rules.intervalMinutes)m between \(start)–\(end)")
+        #if DEBUG
+        print("RPS: planned \(scheduledCount) random notifications at ~every \(rules.intervalMinutes)m between \(start)–\(end)")
+        #endif
 
         finishRefresh()
     }

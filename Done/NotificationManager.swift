@@ -122,8 +122,11 @@ final class NotificationsManager {
 
     func cancel(id: String) {
         let center = UNUserNotificationCenter.current()
-        center.removePendingNotificationRequests(withIdentifiers: [id])
-        center.removeDeliveredNotifications(withIdentifiers: [id])
+
+        DispatchQueue.main.async {
+            center.removePendingNotificationRequests(withIdentifiers: [id])
+            center.removeDeliveredNotifications(withIdentifiers: [id])
+        }
     }
 
     func cancelAll(prefix: String, completion: (() -> Void)? = nil) {
@@ -134,24 +137,26 @@ final class NotificationsManager {
                 .map(\.identifier)
                 .filter { $0.hasPrefix(prefix) }
 
-            if !pendingIDs.isEmpty {
-                center.removePendingNotificationRequests(withIdentifiers: pendingIDs)
-            }
-
             center.getDeliveredNotifications { delivered in
                 let deliveredIDs = delivered
                     .map { $0.request.identifier }
                     .filter { $0.hasPrefix(prefix) }
 
-                if !deliveredIDs.isEmpty {
-                    center.removeDeliveredNotifications(withIdentifiers: deliveredIDs)
+                DispatchQueue.main.async {
+                    if !pendingIDs.isEmpty {
+                        center.removePendingNotificationRequests(withIdentifiers: pendingIDs)
+                    }
+
+                    if !deliveredIDs.isEmpty {
+                        center.removeDeliveredNotifications(withIdentifiers: deliveredIDs)
+                    }
+
+                    #if DEBUG
+                    print("🔕 NotificationsManager: cancelled \(pendingIDs.count) pending + \(deliveredIDs.count) delivered for prefix '\(prefix)'")
+                    #endif
+
+                    completion?()
                 }
-
-                #if DEBUG
-                print("🔕 NotificationsManager: cancelled \(pendingIDs.count) pending + \(deliveredIDs.count) delivered for prefix '\(prefix)'")
-                #endif
-
-                completion?()
             }
         }
     }

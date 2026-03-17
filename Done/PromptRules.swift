@@ -89,9 +89,20 @@ public struct PromptRule: Codable, Equatable {
     // Should be auto-removed after the assigned date?
     public func shouldAutoDelete(after now: Date, calendar cal: Calendar = .current) -> Bool {
         let treatAsOneOff = (oneOff ?? (date != nil))
-        guard treatAsOneOff, let d = date else { return false }
-        // Delete once the day has fully passed (midnight after 'date')
-        return now > cal.startOfDay(for: d).addingTimeInterval(24 * 60 * 60)
+        guard treatAsOneOff else { return false }
+
+        // Explicit one-off date
+        if let d = date {
+            return now > cal.startOfDay(for: d).addingTimeInterval(24 * 60 * 60)
+        }
+
+        // Fallback: one-off with time but no date means "today"
+        if timeHour != nil || timeMinute != nil {
+            let today = cal.startOfDay(for: now)
+            return now > today.addingTimeInterval(24 * 60 * 60)
+        }
+
+        return false
     }
 }
 
@@ -101,9 +112,18 @@ public extension PromptRule {
     var recurrenceKind: PromptRecurrenceKind {
         let treatAsOneOff = (oneOff ?? (date != nil))
 
+        // One-off with explicit date
         if treatAsOneOff, date != nil {
             return .oneOff
         }
+
+        // Fallback support:
+        // If the UI saved a one-off time but forgot the explicit date,
+        // treat it as a one-off scheduled for "today at that time".
+        if treatAsOneOff, timeHour != nil, timeMinute != nil {
+            return .oneOff
+        }
+
         if weekday != nil {
             return .weekly
         }
@@ -126,8 +146,8 @@ public extension PromptRule {
             return nil
 
         case .oneOff:
-            guard let d = date else { return nil }
-            let target = targetDate(forBaseDay: d, calendar: cal)
+            let baseDay = effectiveOneOffBaseDay(relativeTo: now, calendar: cal)
+            let target = targetDate(forBaseDay: baseDay, calendar: cal)
             return (target >= now) ? target : nil
 
         case .weekly:
@@ -157,8 +177,8 @@ public extension PromptRule {
             return nil
 
         case .oneOff:
-            guard let d = date else { return nil }
-            let target = targetDate(forBaseDay: d, calendar: cal)
+            let baseDay = effectiveOneOffBaseDay(relativeTo: now, calendar: cal)
+            let target = targetDate(forBaseDay: baseDay, calendar: cal)
             return (target <= now) ? target : nil
 
         case .weekly:
@@ -212,6 +232,16 @@ public extension PromptRule {
 // MARK: - Internal helpers
 
 private extension PromptRule {
+    func effectiveOneOffBaseDay(relativeTo now: Date, calendar cal: Calendar) -> Date {
+        if let d = date {
+            return d
+        }
+
+        // Fallback for one-off + time but no explicit date:
+        // treat it as scheduled for today.
+        return now
+    }
+
     func targetDate(forBaseDay baseDay: Date, calendar cal: Calendar) -> Date {
         if let h = timeHour, let m = timeMinute,
            let dated = cal.date(bySettingHour: h, minute: m, second: 0, of: baseDay) {
