@@ -69,7 +69,6 @@ final class ScheduledPromptScheduler {
         print("SPS: loaded \(events.count) prompt action events")
         #endif
 
-        // Only prompts with an actual schedule rule belong in this system
         let scheduledPrompts = prompts.filter { item in
             guard let rule = rulesByText[item.text] else {
                 #if DEBUG
@@ -181,7 +180,6 @@ final class ScheduledPromptScheduler {
                 }
             }
 
-            // Keep the earliest notifications only, so we stay under the global cap.
             let finalRequests = Array(
                 allRequests
                     .sorted { $0.fireDate < $1.fireDate }
@@ -223,7 +221,6 @@ final class ScheduledPromptScheduler {
 
     // MARK: - Target selection
 
-    /// Chooses the current cycle target if it's still incomplete, otherwise the next target.
     private func currentOrNextTarget(
         for prompt: PromptItem,
         rule: PromptRule,
@@ -231,31 +228,60 @@ final class ScheduledPromptScheduler {
         events: [PromptActionEvent],
         calendar cal: Calendar
     ) -> Date? {
-        // 1) If there is a past target whose cycle is still incomplete, keep using it.
+        switch rule.recurrenceKind {
+        case .oneOff:
+            return currentOrNextTargetForOneOff(
+                prompt: prompt,
+                rule: rule,
+                now: now,
+                events: events,
+                calendar: cal
+            )
+
+        case .weekly, .monthly, .yearly:
+            return currentOrNextTargetForRecurring(
+                prompt: prompt,
+                rule: rule,
+                now: now,
+                events: events,
+                calendar: cal
+            )
+
+        case .none:
+            #if DEBUG
+            print("SPS: '\(prompt.text)' has recurrence .none in currentOrNextTarget")
+            #endif
+            return nil
+        }
+    }
+
+    private func currentOrNextTargetForOneOff(
+        prompt: PromptItem,
+        rule: PromptRule,
+        now: Date,
+        events: [PromptActionEvent],
+        calendar cal: Calendar
+    ) -> Date? {
         if let previousTarget = rule.previousTarget(before: now, calendar: cal) {
             let cycleStart = rule.leadInStart(for: previousTarget, now: now, calendar: cal)
+            let completed = cycleCompleted(
+                promptID: prompt.id,
+                cycleStart: cycleStart,
+                events: events
+            )
 
-            if now > previousTarget {
-                let completed = cycleCompleted(
-                    promptID: prompt.id,
-                    cycleStart: cycleStart,
-                    events: events
-                )
+            #if DEBUG
+            print("SPS: one-off previous target for '\(prompt.text)' = \(previousTarget) | completed=\(completed)")
+            #endif
 
-                #if DEBUG
-                print("SPS: previous target for '\(prompt.text)' = \(previousTarget) | completed=\(completed)")
-                #endif
-
-                if !completed {
-                    return previousTarget
-                }
+            if !completed {
+                return previousTarget
             }
         }
 
-        // 2) Otherwise use the next target.
         guard let nextTarget = rule.nextTarget(after: now, calendar: cal) else {
             #if DEBUG
-            print("SPS: rule.nextTarget returned nil for '\(prompt.text)'")
+            print("SPS: one-off nextTarget returned nil for '\(prompt.text)'")
             #endif
             return nil
         }
@@ -268,22 +294,80 @@ final class ScheduledPromptScheduler {
         )
 
         #if DEBUG
-        print("SPS: next target for '\(prompt.text)' = \(nextTarget) | cycleStart=\(cycleStart) | completed=\(completed)")
+        print("SPS: one-off next target for '\(prompt.text)' = \(nextTarget) | cycleStart=\(cycleStart) | completed=\(completed)")
         #endif
 
         if completed {
-            // Current cycle already done early. For recurring prompts, jump to the next recurrence.
-            let later = nextTarget.addingTimeInterval(1)
-            let future = rule.nextTarget(after: later, calendar: cal)
-
             #if DEBUG
-            print("SPS: '\(prompt.text)' current cycle already done, advanced to future target \(String(describing: future))")
+            print("SPS: one-off '\(prompt.text)' already completed for current cycle, no target returned")
             #endif
-
-            return future
+            return nil
         }
 
         return nextTarget
+    }
+
+    private func currentOrNextTargetForRecurring(
+        prompt: PromptItem,
+        rule: PromptRule,
+        now: Date,
+        events: [PromptActionEvent],
+        calendar cal: Calendar
+    ) -> Date? {
+        if let nextTarget = rule.nextTarget(after: now, calendar: cal) {
+            let cycleStart = rule.leadInStart(for: nextTarget, now: now, calendar: cal)
+            let completed = cycleCompleted(
+                promptID: prompt.id,
+                cycleStart: cycleStart,
+                events: events
+            )
+
+            #if DEBUG
+            print("SPS: recurring next target for '\(prompt.text)' = \(nextTarget) | cycleStart=\(cycleStart) | completed=\(completed)")
+            #endif
+
+            if completed {
+                let later = nextTarget.addingTimeInterval(1)
+                let future = rule.nextTarget(after: later, calendar: cal)
+
+                #if DEBUG
+                print("SPS: recurring '\(prompt.text)' current cycle already done, advanced to future target \(String(describing: future))")
+                #endif
+
+                return future
+            }
+
+            return nextTarget
+        }
+
+        if let previousTarget = rule.previousTarget(before: now, calendar: cal) {
+            let cycleStart = rule.leadInStart(for: previousTarget, now: now, calendar: cal)
+            let completed = cycleCompleted(
+                promptID: prompt.id,
+                cycleStart: cycleStart,
+                events: events
+            )
+
+            #if DEBUG
+            print("SPS: recurring previous target fallback for '\(prompt.text)' = \(previousTarget) | completed=\(completed)")
+            #endif
+
+            if now <= previousTarget {
+                return previousTarget
+            }
+
+            if now <= endOfRecurringWindow(for: previousTarget, rule: rule, calendar: cal), !completed {
+                #if DEBUG
+                print("SPS: recurring '\(prompt.text)' is still within active window for previous target")
+                #endif
+                return previousTarget
+            }
+        }
+
+        #if DEBUG
+        print("SPS: recurring '\(prompt.text)' has no valid current or future target")
+        #endif
+        return nil
     }
 
     private func cycleCompleted(
@@ -326,13 +410,11 @@ final class ScheduledPromptScheduler {
         var results: [Date] = []
         let minimumFireDate = now.addingTimeInterval(immediateLeadSeconds)
 
-        // If target is very close or already overdue, force an immediate first reminder.
         let secondsToTarget = target.timeIntervalSince(now)
         let shouldFireImmediately = (secondsToTarget <= immediateWindow)
 
         if shouldFireImmediately {
             let first = min(max(minimumFireDate, start), horizon)
-
             results.append(first)
 
             #if DEBUG
@@ -356,7 +438,6 @@ final class ScheduledPromptScheduler {
                 break
             }
 
-            // Prevent duplicates / non-forward progress.
             if let last = results.last, next <= last {
                 next = last.addingTimeInterval(60)
             }
@@ -383,7 +464,6 @@ final class ScheduledPromptScheduler {
     }
 
     private func cadence(for date: Date, target: Date) -> TimeInterval {
-        // Once the target has passed, stay steady. Do not intensify further.
         if date >= target {
             return overdueInterval
         }
@@ -393,27 +473,51 @@ final class ScheduledPromptScheduler {
 
         switch hours {
         case let h where h > 24 * 14:
-            return 24 * 60 * 60       // > 14 days away
+            return 24 * 60 * 60
         case let h where h > 24 * 7:
-            return 12 * 60 * 60       // 7–14 days
+            return 12 * 60 * 60
         case let h where h > 24 * 3:
-            return 8 * 60 * 60        // 3–7 days
+            return 8 * 60 * 60
         case let h where h > 24:
-            return 4 * 60 * 60        // 1–3 days
+            return 4 * 60 * 60
         case let h where h > 6:
-            return 2 * 60 * 60        // 6–24 hours
+            return 2 * 60 * 60
         case let h where h > 1:
-            return 60 * 60            // 1–6 hours
+            return 60 * 60
         default:
-            return TimeInterval(max(RandomPromptRules().intervalMinutes, 5) * 60)
+            return maxCadence
         }
     }
 
     private func jitteredInterval(from base: TimeInterval) -> TimeInterval {
-        // Gentle randomisation so it doesn't feel robotic.
         let lower = base * 0.85
         let upper = base * 1.15
         return Double.random(in: lower...upper)
+    }
+
+    private func endOfRecurringWindow(
+        for target: Date,
+        rule: PromptRule,
+        calendar cal: Calendar
+    ) -> Date {
+        switch rule.recurrenceKind {
+        case .weekly:
+            if rule.timeHour != nil, rule.timeMinute != nil {
+                return target.addingTimeInterval(24 * 60 * 60)
+            } else {
+                return cal.startOfDay(for: target).addingTimeInterval(24 * 60 * 60)
+            }
+
+        case .monthly, .yearly:
+            if rule.timeHour != nil, rule.timeMinute != nil {
+                return target.addingTimeInterval(24 * 60 * 60)
+            } else {
+                return cal.startOfDay(for: target).addingTimeInterval(24 * 60 * 60)
+            }
+
+        case .oneOff, .none:
+            return target
+        }
     }
 
     private func notificationID(for promptID: UUID, fireDate: Date, index: Int) -> String {

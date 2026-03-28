@@ -88,7 +88,7 @@ public struct PromptRule: Codable, Equatable {
 
     // Should be auto-removed after the assigned date?
     public func shouldAutoDelete(after now: Date, calendar cal: Calendar = .current) -> Bool {
-        let treatAsOneOff = (oneOff ?? (date != nil))
+        let treatAsOneOff = (oneOff == true) || (recurrenceKind == .oneOff)
         guard treatAsOneOff else { return false }
 
         // Explicit one-off date
@@ -110,29 +110,36 @@ public struct PromptRule: Codable, Equatable {
 
 public extension PromptRule {
     var recurrenceKind: PromptRecurrenceKind {
-        let treatAsOneOff = (oneOff ?? (date != nil))
-
-        // One-off with explicit date
-        if treatAsOneOff, date != nil {
+        // Explicit one-off always wins
+        if oneOff == true {
             return .oneOff
         }
 
-        // Fallback support:
-        // If the UI saved a one-off time but forgot the explicit date,
-        // treat it as a one-off scheduled for "today at that time".
-        if treatAsOneOff, timeHour != nil, timeMinute != nil {
-            return .oneOff
+        // Recurring rules take priority over any leftover date value
+        if month != nil, day != nil {
+            return .yearly
+        }
+
+        if monthlyDay != nil || (monthlyIsLastDay ?? false) {
+            return .monthly
         }
 
         if weekday != nil {
             return .weekly
         }
-        if month != nil, day != nil {
-            return .yearly
+
+        // Only fall back to one-off if nothing else defines recurrence
+        if date != nil {
+            return .oneOff
         }
-        if monthlyDay != nil || (monthlyIsLastDay ?? false) {
-            return .monthly
+
+        // Fallback support:
+        // If the UI saved a time but no other recurrence structure,
+        // treat it as a one-off scheduled for today at that time.
+        if timeHour != nil, timeMinute != nil {
+            return .oneOff
         }
+
         return .none
     }
 
