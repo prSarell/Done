@@ -13,6 +13,9 @@ struct ContentView: View {
 
             RewardsView()
                 .tabItem { Label("Rewards", systemImage: "gift") }
+
+            StatsView()
+                .tabItem { Label("Stats", systemImage: "chart.bar.fill") }
         }
     }
 }

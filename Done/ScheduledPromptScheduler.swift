@@ -375,12 +375,7 @@ final class ScheduledPromptScheduler {
         cycleStart: Date,
         events: [PromptActionEvent]
     ) -> Bool {
-        let latestForCycle = events
-            .filter { $0.promptID == promptID && $0.occurredAt >= cycleStart }
-            .sorted { $0.occurredAt > $1.occurredAt }
-            .first
-
-        return latestForCycle?.action == .done
+        events.contains { $0.promptID == promptID && $0.occurredAt >= cycleStart }
     }
 
     // MARK: - Fire date generation

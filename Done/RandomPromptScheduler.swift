@@ -161,6 +161,14 @@ final class RandomPromptScheduler {
 
         let perPromptRules = PromptRulesStore.load()
 
+        // Build set of prompt IDs already acted on today (done or skipped)
+        let todayStart = cal.startOfDay(for: now)
+        let actedOnToday: Set<UUID> = Set(
+            PromptStatusStore.load()
+                .filter { $0.occurredAt >= todayStart }
+                .map { $0.promptID }
+        )
+
         // Filter candidates:
         // 1. non-empty text
         // 2. EXCLUDE prompts with a valid scheduling rule
@@ -170,6 +178,14 @@ final class RandomPromptScheduler {
         var candidates = allPrompts.filter { prompt in
             let trimmed = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return false }
+
+            // Exclude prompts already done or skipped today
+            if actedOnToday.contains(prompt.id) {
+                #if DEBUG
+                print("RPS: excluding prompt acted on today -> '\(prompt.text)'")
+                #endif
+                return false
+            }
 
             guard let rule = perPromptRules[prompt.text] else {
                 return true // no rule -> stays in random pool

@@ -10,6 +10,7 @@
 import Foundation
 import UserNotifications
 
+@MainActor
 final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
 
     // Category + Action IDs
@@ -59,5 +60,18 @@ final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelega
         #if DEBUG
         print("✅ Recorded prompt action:", action.rawValue, "|", promptText)
         #endif
+
+        // Cancel any remaining queued notifications for this prompt so they don't fire later today
+        let center = UNUserNotificationCenter.current()
+        let pending = await center.pendingNotificationRequests()
+        let toCancel = pending
+            .filter { $0.identifier.contains(promptID.uuidString) }
+            .map { $0.identifier }
+        if !toCancel.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: toCancel)
+            #if DEBUG
+            print("🗑️ Cancelled \(toCancel.count) pending notification(s) for '\(promptText)'")
+            #endif
+        }
     }
 }
