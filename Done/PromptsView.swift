@@ -126,6 +126,8 @@ struct PromptsView: View {
     /// Debounce schedule rebuilds so we don’t spam notifications while typing/editing.
     @State private var scheduleTask: Task<Void, Never>?
 
+    @Environment(\.scenePhase) private var scenePhase
+
     // MARK: - Derived collections / helpers
 
     private var allPromptItems: [PromptItem] {
@@ -176,6 +178,8 @@ struct PromptsView: View {
 
             hasFinishedInitialLoad = true
 
+            purgeCompletedOneOffPrompts()
+
             // Plan once based on loaded data (NOT repeatedly during load)
             RandomPromptScheduler.shared.refreshScheduleToday(
                 allPrompts: allPromptItems,
@@ -197,6 +201,12 @@ struct PromptsView: View {
             guard hasFinishedInitialLoad else { return }
             saveRules()
             scheduleRandomPromptsDebounced(forceRebuild: true)
+        }
+
+        // Purge completed one-offs when app returns to foreground
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active, hasFinishedInitialLoad else { return }
+            purgeCompletedOneOffPrompts()
         }
 
         // Unified Alert editor sheet
@@ -682,6 +692,44 @@ struct PromptsView: View {
 
         rules[key] = rule
         showingAlertSheet = false
+    }
+
+    // MARK: - One-off cleanup
+
+    /// Deletes any one-off prompt that the user has already marked done.
+    /// Called on launch and when the app returns to the foreground.
+    private func purgeCompletedOneOffPrompts() {
+        let doneIDs = Set(
+            PromptStatusStore.load()
+                .filter { $0.action == .done }
+                .map { $0.promptID }
+        )
+        guard !doneIDs.isEmpty else { return }
+
+        let isOneOffDone: (PromptItem) -> Bool = { [rules] item in
+            guard doneIDs.contains(item.id) else { return false }
+            return rules[item.text]?.recurrenceKind == .oneOff
+        }
+
+        let removedTexts = (dailyItems + weeklyItems + workItems + monthlyItems
+            + yearlyItems + eventsItems + studyItems + mentalHealthItems)
+            .filter(isOneOffDone)
+            .map { $0.text }
+
+        guard !removedTexts.isEmpty else { return }
+
+        dailyItems.removeAll(where: isOneOffDone)
+        weeklyItems.removeAll(where: isOneOffDone)
+        workItems.removeAll(where: isOneOffDone)
+        monthlyItems.removeAll(where: isOneOffDone)
+        yearlyItems.removeAll(where: isOneOffDone)
+        eventsItems.removeAll(where: isOneOffDone)
+        studyItems.removeAll(where: isOneOffDone)
+        mentalHealthItems.removeAll(where: isOneOffDone)
+
+        for text in removedTexts {
+            rules[text] = nil
+        }
     }
 
     // MARK: - Persistence
