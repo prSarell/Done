@@ -1,6 +1,7 @@
 // Path: Done/PromptsView.swift
 
 import SwiftUI
+import UserNotifications
 
 // Codable-friendly model
 struct PromptItem: Identifiable, Hashable, Codable {
@@ -59,6 +60,8 @@ private struct PromptRow: View {
     let item: PromptItem
     let alertLabel: String
     let onAlertTap: () -> Void
+    let onDone: () -> Void
+    let onSkip: () -> Void
 
     var body: some View {
         HStack {
@@ -77,6 +80,14 @@ private struct PromptRow: View {
                     )
             }
             .buttonStyle(.plain)
+        }
+        .contextMenu {
+            Button { onDone() } label: {
+                Label("Mark Done", systemImage: "checkmark.circle.fill")
+            }
+            Button { onSkip() } label: {
+                Label("Skip", systemImage: "forward.circle.fill")
+            }
         }
     }
 }
@@ -343,7 +354,9 @@ struct PromptsView: View {
                     PromptRow(
                         item: item,
                         alertLabel: alertLabel(for: item),
-                        onAlertTap: { startEditingAlert(for: item) }
+                        onAlertTap: { startEditingAlert(for: item) },
+                        onDone: { markPrompt(item, action: .done) },
+                        onSkip: { markPrompt(item, action: .skipped) }
                     )
                 }
                 .onDelete { indexSet in
@@ -354,6 +367,48 @@ struct PromptsView: View {
     }
 
     // MARK: - Add / Delete
+
+    private func markPrompt(_ item: PromptItem, action: PromptAction) {
+        PromptStatusStore.append(
+            PromptActionEvent(promptID: item.id, promptText: item.text, action: action)
+        )
+
+        // Cancel any pending notifications for this prompt
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let pending = await center.pendingNotificationRequests()
+            let toCancel = pending
+                .filter { $0.identifier.contains(item.id.uuidString) }
+                .map { $0.identifier }
+            if !toCancel.isEmpty {
+                center.removePendingNotificationRequests(withIdentifiers: toCancel)
+            }
+        }
+
+        // Done removes the prompt unless it is a repeating schedule (those come back by design)
+        if action == .done {
+            switch rules[item.text]?.recurrenceKind {
+            case .weekly, .monthly, .yearly:
+                break  // keep repeating prompts in the list
+            default:
+                removePrompt(item)
+            }
+        }
+
+        scheduleRandomPromptsDebounced(forceRebuild: true)
+    }
+
+    private func removePrompt(_ item: PromptItem) {
+        dailyItems.removeAll        { $0.id == item.id }
+        weeklyItems.removeAll       { $0.id == item.id }
+        workItems.removeAll         { $0.id == item.id }
+        monthlyItems.removeAll      { $0.id == item.id }
+        yearlyItems.removeAll       { $0.id == item.id }
+        eventsItems.removeAll       { $0.id == item.id }
+        studyItems.removeAll        { $0.id == item.id }
+        mentalHealthItems.removeAll { $0.id == item.id }
+        rules[item.text] = nil
+    }
 
     private var addDisabled: Bool {
         draftTextTrimmed.isEmpty
@@ -699,9 +754,9 @@ struct PromptsView: View {
         showingAlertSheet = false
     }
 
-    // MARK: - One-off cleanup
+    // MARK: - Done cleanup
 
-    /// Deletes any one-off prompt that the user has already marked done.
+    /// Removes prompts marked done via notification, unless they are repeating.
     /// Called on launch and when the app returns to the foreground.
     private func purgeCompletedOneOffPrompts() {
         let doneIDs = Set(
@@ -711,26 +766,29 @@ struct PromptsView: View {
         )
         guard !doneIDs.isEmpty else { return }
 
-        let isOneOffDone: (PromptItem) -> Bool = { [rules] item in
+        let shouldRemove: (PromptItem) -> Bool = { [rules] item in
             guard doneIDs.contains(item.id) else { return false }
-            return rules[item.text]?.recurrenceKind == .oneOff
+            switch rules[item.text]?.recurrenceKind {
+            case .weekly, .monthly, .yearly: return false
+            default: return true
+            }
         }
 
         let removedTexts = (dailyItems + weeklyItems + workItems + monthlyItems
             + yearlyItems + eventsItems + studyItems + mentalHealthItems)
-            .filter(isOneOffDone)
+            .filter(shouldRemove)
             .map { $0.text }
 
         guard !removedTexts.isEmpty else { return }
 
-        dailyItems.removeAll(where: isOneOffDone)
-        weeklyItems.removeAll(where: isOneOffDone)
-        workItems.removeAll(where: isOneOffDone)
-        monthlyItems.removeAll(where: isOneOffDone)
-        yearlyItems.removeAll(where: isOneOffDone)
-        eventsItems.removeAll(where: isOneOffDone)
-        studyItems.removeAll(where: isOneOffDone)
-        mentalHealthItems.removeAll(where: isOneOffDone)
+        dailyItems.removeAll(where: shouldRemove)
+        weeklyItems.removeAll(where: shouldRemove)
+        workItems.removeAll(where: shouldRemove)
+        monthlyItems.removeAll(where: shouldRemove)
+        yearlyItems.removeAll(where: shouldRemove)
+        eventsItems.removeAll(where: shouldRemove)
+        studyItems.removeAll(where: shouldRemove)
+        mentalHealthItems.removeAll(where: shouldRemove)
 
         for text in removedTexts {
             rules[text] = nil

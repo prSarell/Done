@@ -388,6 +388,24 @@ final class ScheduledPromptScheduler {
         horizon: Date,
         calendar cal: Calendar
     ) -> [Date] {
+        // Time-specific prompts: fire twice in the 30 min before and twice in the 30 min after.
+        // Marking done/skip from any notification cancels the rest (handled by the delegate).
+        if rule.timeHour != nil, rule.timeMinute != nil {
+            let minimumFireDate = now.addingTimeInterval(immediateLeadSeconds)
+            let candidates: [Date] = [
+                target.addingTimeInterval(-30 * 60),
+                target.addingTimeInterval(-15 * 60),
+                target.addingTimeInterval(15 * 60),
+                target.addingTimeInterval(30 * 60)
+            ]
+            let results = candidates.filter { $0 >= minimumFireDate && $0 <= horizon }
+            #if DEBUG
+            print("SPS: '\(prompt.text)' time-window fire dates: \(results)")
+            #endif
+            return results
+        }
+
+        // Date/weekday-only prompts: use the rolling lead-in cadence.
         let leadInStart = rule.leadInStart(for: target, now: now, calendar: cal)
         let start = max(now, leadInStart)
 
