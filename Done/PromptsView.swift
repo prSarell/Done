@@ -126,6 +126,8 @@ struct PromptsView: View {
     /// Debounce schedule rebuilds so we don’t spam notifications while typing/editing.
     @State private var scheduleTask: Task<Void, Never>?
 
+    @FocusState private var draftFocused: Bool
+
     @Environment(\.scenePhase) private var scenePhase
 
     // MARK: - Derived collections / helpers
@@ -294,6 +296,8 @@ struct PromptsView: View {
             HStack(spacing: 8) {
                 TextField(placeholderText, text: $draftText)
                     .textInputAutocapitalization(.sentences)
+                    .focused($draftFocused)
+                    .onSubmit { addDraft() }
 
                 Button("Add") { addDraft() }
                     .disabled(addDisabled)
@@ -371,6 +375,7 @@ struct PromptsView: View {
         }
 
         draftText = ""
+        draftFocused = false
     }
 
     private func deleteItems(at indexSet: IndexSet, in category: PromptCategory) {
