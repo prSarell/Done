@@ -297,7 +297,17 @@ final class RandomPromptScheduler {
             // Stable deterministic ID per slot
             let id = notifID(for: next.id, on: time, index: i)
 
-            NotificationsManager.shared.scheduleOneOff(id: id, title: next.text, at: time)
+            let userInfo: [AnyHashable: Any] = [
+                PromptNotificationDelegate.kPromptID: next.id.uuidString,
+                PromptNotificationDelegate.kPromptText: next.text
+            ]
+            NotificationsManager.shared.scheduleOneOff(
+                id: id,
+                title: next.text,
+                at: time,
+                userInfo: userInfo,
+                categoryID: PromptNotificationDelegate.categoryID
+            )
             scheduledIDs.append(id)
 
             // Track last shown (use actual planned fire time, not "now")
