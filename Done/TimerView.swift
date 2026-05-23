@@ -1,5 +1,6 @@
 // File: Done/Views/TimerView.swift
 import SwiftUI
+import UIKit
 
 enum TimerMode: String, CaseIterable {
     case practice = "Practice"
@@ -185,6 +186,7 @@ private struct DialView: View {
     var modeLabel: String
 
     @State private var lastAngle: Double? = nil
+    @State private var lastHapticMinute: Int = -1
 
     private let strokeWidth: CGFloat = 14
 
@@ -192,11 +194,18 @@ private struct DialView: View {
         phase == .setting ? targetSeconds : elapsedSeconds
     }
 
+    // Completed full hours while in setting mode (drives the dimmed background ring)
+    private var completedHours: Int {
+        phase == .setting ? targetSeconds / 3600 : 0
+    }
+
     private var progress: Double {
         switch phase {
         case .setting:
             guard targetSeconds > 0 else { return 0 }
-            return Double(targetSeconds % 3600) / 3600.0
+            let remainder = targetSeconds % 3600
+            // Keep arc full at the top of each hour rather than snapping back to zero
+            return remainder == 0 ? 1.0 : Double(remainder) / 3600.0
         case .running, .paused:
             guard targetSeconds > 0 else { return 0 }
             return min(Double(elapsedSeconds) / Double(targetSeconds), 1.0)
@@ -212,6 +221,12 @@ private struct DialView: View {
                 // Background track
                 Circle()
                     .stroke(Color(.systemGray5), lineWidth: strokeWidth)
+
+                // Dimmed full ring for each completed hour — persists so colour never drops out
+                if completedHours > 0 {
+                    Circle()
+                        .stroke(arcColor.opacity(0.25), lineWidth: strokeWidth)
+                }
 
                 // Progress arc
                 if progress > 0 {
@@ -265,18 +280,28 @@ private struct DialView: View {
                         )
                         let angle = Self.polarAngle(from: local, center: center)
                         defer { lastAngle = angle }
-                        guard let last = lastAngle else { return }
+                        guard let last = lastAngle else {
+                            lastHapticMinute = targetSeconds / 60
+                            return
+                        }
                         var delta = angle - last
                         if delta > .pi { delta -= 2 * .pi }
                         if delta < -.pi { delta += 2 * .pi }
                         // clockwise (positive delta) adds time; 1 rotation = 1 hour
                         let added = Int(delta * 3600 / (2 * .pi))
                         targetSeconds = max(0, targetSeconds + added)
+                        // Haptic click on each minute boundary
+                        let currentMinute = targetSeconds / 60
+                        if currentMinute != lastHapticMinute {
+                            UISelectionFeedbackGenerator().selectionChanged()
+                            lastHapticMinute = currentMinute
+                        }
                     }
                     .onEnded { _ in
                         guard phase == .setting else { return }
                         targetSeconds = (targetSeconds / 60) * 60
                         lastAngle = nil
+                        lastHapticMinute = -1
                     }
             )
         }
