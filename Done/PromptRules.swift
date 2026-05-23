@@ -147,6 +147,79 @@ public extension PromptRule {
         recurrenceKind != .none
     }
 
+    var scheduleDescription: String {
+        let cal = Calendar.current
+        let now = Date()
+
+        func timeString() -> String? {
+            guard let h = timeHour, let m = timeMinute,
+                  let t = cal.date(bySettingHour: h, minute: m, second: 0, of: now) else { return nil }
+            let df = DateFormatter()
+            df.dateStyle = .none
+            df.timeStyle = .short
+            return df.string(from: t)
+        }
+
+        switch recurrenceKind {
+        case .weekly:
+            let dayName: String
+            if let wd = weekday, wd >= 1, wd <= 7 {
+                dayName = "Every \(cal.weekdaySymbols[wd - 1])"
+            } else {
+                dayName = "Weekly"
+            }
+            if let t = timeString() { return "\(dayName) · \(t)" }
+            return dayName
+
+        case .monthly:
+            let dayPart: String
+            if monthlyIsLastDay == true {
+                dayPart = "Last day of month"
+            } else if let d = monthlyDay {
+                let nf = NumberFormatter()
+                nf.numberStyle = .ordinal
+                let ordinal = nf.string(from: NSNumber(value: d)) ?? "\(d)"
+                dayPart = "Monthly on the \(ordinal)"
+            } else {
+                dayPart = "Monthly"
+            }
+            if let t = timeString() { return "\(dayPart) · \(t)" }
+            return dayPart
+
+        case .yearly:
+            guard let month, let day else { return "Yearly" }
+            var comps = DateComponents()
+            comps.month = month
+            comps.day = day
+            comps.year = cal.component(.year, from: now)
+            let df = DateFormatter()
+            df.dateFormat = "MMM d"
+            let prefix: String
+            if let d = cal.date(from: comps) {
+                prefix = "Every \(df.string(from: d))"
+            } else {
+                prefix = "Yearly"
+            }
+            if let t = timeString() { return "\(prefix) · \(t)" }
+            return prefix
+
+        case .oneOff:
+            if let d = date {
+                let df = DateFormatter()
+                df.dateStyle = .medium
+                df.timeStyle = .none
+                let dateStr = df.string(from: d)
+                if let t = timeString() { return "\(dateStr) · \(t)" }
+                return dateStr
+            }
+            if let t = timeString() { return "Today · \(t)" }
+            return ""
+
+        case .none:
+            return ""
+        }
+    }
+
     func nextTarget(after now: Date, calendar cal: Calendar = .current) -> Date? {
         switch recurrenceKind {
         case .none:

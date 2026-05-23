@@ -161,6 +161,8 @@ final class ScheduledPromptScheduler {
                     #endif
                 }
 
+                let subtitle = rule.scheduleDescription
+
                 for (index, fireDate) in dates.enumerated() {
                     let id = self.notificationID(for: prompt.id, fireDate: fireDate, index: index)
 
@@ -173,6 +175,7 @@ final class ScheduledPromptScheduler {
                         PendingScheduledNotification(
                             id: id,
                             title: prompt.text,
+                            subtitle: subtitle,
                             fireDate: fireDate,
                             userInfo: userInfo
                         )
@@ -205,6 +208,7 @@ final class ScheduledPromptScheduler {
                     id: req.id,
                     title: req.title,
                     at: req.fireDate,
+                    subtitle: req.subtitle,
                     userInfo: req.userInfo,
                     categoryID: PromptNotificationDelegate.categoryID
                 )
@@ -572,6 +576,7 @@ final class ScheduledPromptScheduler {
 private struct PendingScheduledNotification {
     let id: String
     let title: String
+    let subtitle: String
     let fireDate: Date
     let userInfo: [AnyHashable: Any]
 }

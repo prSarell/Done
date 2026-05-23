@@ -80,6 +80,7 @@ final class NotificationsManager {
         id: String,
         title: String,
         at date: Date,
+        subtitle: String? = nil,
         userInfo: [AnyHashable: Any]? = nil,
         categoryID: String? = nil
     ) {
@@ -90,6 +91,7 @@ final class NotificationsManager {
 
         let content = UNMutableNotificationContent()
         content.title = title
+        if let subtitle, !subtitle.isEmpty { content.subtitle = subtitle }
         content.sound = .default
 
         if let userInfo {
