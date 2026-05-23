@@ -373,15 +373,23 @@ struct PromptsView: View {
             PromptActionEvent(promptID: item.id, promptText: item.text, action: action)
         )
 
-        // Cancel any pending notifications for this prompt
+        // Cancel pending notifications and remove delivered banners for this prompt
         Task {
             let center = UNUserNotificationCenter.current()
-            let pending = await center.pendingNotificationRequests()
+            async let pendingAsync = center.pendingNotificationRequests()
+            async let deliveredAsync = center.deliveredNotifications()
+            let (pending, delivered) = await (pendingAsync, deliveredAsync)
             let toCancel = pending
                 .filter { $0.identifier.contains(item.id.uuidString) }
                 .map { $0.identifier }
+            let toRemove = delivered
+                .filter { $0.request.identifier.contains(item.id.uuidString) }
+                .map { $0.request.identifier }
             if !toCancel.isEmpty {
                 center.removePendingNotificationRequests(withIdentifiers: toCancel)
+            }
+            if !toRemove.isEmpty {
+                center.removeDeliveredNotifications(withIdentifiers: toRemove)
             }
         }
 

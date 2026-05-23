@@ -62,15 +62,27 @@ final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelega
         #endif
 
         // Cancel any remaining queued notifications for this prompt so they don't fire later today
+        // Also remove delivered notifications so stale banners clear from the lock screen
         let center = UNUserNotificationCenter.current()
-        let pending = await center.pendingNotificationRequests()
+        async let pendingAsync = center.pendingNotificationRequests()
+        async let deliveredAsync = center.deliveredNotifications()
+        let (pending, delivered) = await (pendingAsync, deliveredAsync)
         let toCancel = pending
             .filter { $0.identifier.contains(promptID.uuidString) }
             .map { $0.identifier }
+        let toRemove = delivered
+            .filter { $0.request.identifier.contains(promptID.uuidString) }
+            .map { $0.request.identifier }
         if !toCancel.isEmpty {
             center.removePendingNotificationRequests(withIdentifiers: toCancel)
             #if DEBUG
             print("🗑️ Cancelled \(toCancel.count) pending notification(s) for '\(promptText)'")
+            #endif
+        }
+        if !toRemove.isEmpty {
+            center.removeDeliveredNotifications(withIdentifiers: toRemove)
+            #if DEBUG
+            print("🗑️ Removed \(toRemove.count) delivered notification(s) for '\(promptText)'")
             #endif
         }
     }
