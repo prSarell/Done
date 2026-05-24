@@ -3,8 +3,8 @@ import SwiftUI
 import UIKit
 
 enum TimerMode: String, CaseIterable {
-    case practice = "Practice"
-    case challenge = "Challenge"
+    case focus = "Focus"
+    case personalBest = "Personal Best"
 }
 
 fileprivate enum TimerPhase {
@@ -13,14 +13,21 @@ fileprivate enum TimerPhase {
 
 struct TimerView: View {
     @EnvironmentObject private var notesVM: TimerNotesViewModel
+    @EnvironmentObject private var rewardsVM: RewardsViewModel
 
-    @State private var mode: TimerMode = .practice
+    @State private var mode: TimerMode = .focus
     @State private var phase: TimerPhase = .setting
     @State private var targetSeconds: Int = 0
     @State private var elapsedSeconds: Int = 0
     @State private var timerHandle: Timer?
     @State private var showCompleteSheet = false
     @State private var noteText = ""
+    @State private var rewardMessage: String? = nil
+    @State private var rewardColor: Color = .blue
+
+    private static let rewardColors: [Color] = [
+        .blue, .purple, .orange, .green, .teal, .indigo, .mint, .cyan, .pink
+    ]
 
     private var isOverTarget: Bool {
         targetSeconds > 0 && elapsedSeconds >= targetSeconds
@@ -31,33 +38,45 @@ struct TimerView: View {
     }
 
     var body: some View {
-        VStack(spacing: 28) {
-            Picker("Mode", selection: $mode) {
-                ForEach(TimerMode.allCases, id: \.self) {
-                    Text($0.rawValue).tag($0)
+        ZStack {
+            VStack(spacing: 28) {
+                Picker("Mode", selection: $mode) {
+                    ForEach(TimerMode.allCases, id: \.self) {
+                        Text($0.rawValue).tag($0)
+                    }
                 }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 24)
-            .disabled(phase != .setting)
-
-            DialView(
-                targetSeconds: $targetSeconds,
-                elapsedSeconds: elapsedSeconds,
-                phase: phase,
-                arcColor: arcColor,
-                modeLabel: mode.rawValue
-            )
-            .frame(maxWidth: .infinity)
-            .aspectRatio(1, contentMode: .fit)
-            .padding(.horizontal, 40)
-
-            controlButtons
+                .pickerStyle(.segmented)
                 .padding(.horizontal, 24)
+                .disabled(phase != .setting)
 
-            Spacer()
+                DialView(
+                    targetSeconds: $targetSeconds,
+                    elapsedSeconds: elapsedSeconds,
+                    phase: phase,
+                    arcColor: arcColor,
+                    modeLabel: mode.rawValue
+                )
+                .frame(maxWidth: .infinity)
+                .aspectRatio(1, contentMode: .fit)
+                .padding(.horizontal, 40)
+
+                controlButtons
+                    .padding(.horizontal, 24)
+
+                Spacer()
+            }
+            .padding(.top, 16)
+
+            if let message = rewardMessage {
+                RewardOverlay(message: message, color: rewardColor) {
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        rewardMessage = nil
+                    }
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            }
         }
-        .padding(.top, 16)
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: rewardMessage != nil)
         .navigationTitle("Timer")
         .onDisappear { timerHandle?.invalidate() }
         .sheet(isPresented: $showCompleteSheet) { completeSheet }
@@ -139,8 +158,27 @@ struct TimerView: View {
                             text: text.isEmpty ? "Timer session" : text,
                             durationSeconds: elapsedSeconds
                         )
+
+                        let shouldReward: Bool
+                        switch mode {
+                        case .personalBest:
+                            // Beat the target
+                            shouldReward = targetSeconds > 0 && elapsedSeconds < targetSeconds
+                        case .focus:
+                            // Went longer than planned
+                            shouldReward = targetSeconds > 0 && elapsedSeconds > targetSeconds
+                        }
+
                         resetTimer()
                         showCompleteSheet = false
+
+                        if shouldReward {
+                            let msg = rewardsVM.triggerRandomReward()
+                            rewardColor = Self.rewardColors.randomElement() ?? .blue
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                rewardMessage = msg
+                            }
+                        }
                     }
                 }
             }
@@ -173,6 +211,37 @@ struct TimerView: View {
     private func formatted(_ s: Int) -> String {
         let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
         return String(format: "%02d:%02d:%02d", h, m, sec)
+    }
+}
+
+// MARK: - Reward overlay
+
+private struct RewardOverlay: View {
+    let message: String
+    let color: Color
+    let dismiss: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture { dismiss() }
+
+            Text(message)
+                .font(.title.bold())
+                .foregroundStyle(color)
+                .multilineTextAlignment(.center)
+                .padding(32)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
+                .padding(40)
+        }
+        .onAppear {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            Task {
+                try? await Task.sleep(for: .seconds(2.5))
+                dismiss()
+            }
+        }
     }
 }
 
@@ -325,5 +394,6 @@ private struct DialView: View {
     NavigationStack {
         TimerView()
             .environmentObject(TimerNotesViewModel())
+            .environmentObject(RewardsViewModel())
     }
 }

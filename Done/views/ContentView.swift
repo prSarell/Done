@@ -23,5 +23,6 @@ struct ContentView: View {
 #Preview {
     ContentView()
         .environmentObject(TimerNotesViewModel())
+        .environmentObject(RewardsViewModel())
 }
 

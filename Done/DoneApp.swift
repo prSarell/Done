@@ -15,6 +15,7 @@ import UIKit
 @main
 struct DoneApp: App {
     @StateObject private var notesVM = TimerNotesViewModel()
+    @StateObject private var rewardsVM = RewardsViewModel()
 
     // ✅ Add delegate instance (must be strongly held)
     private let notifDelegate = PromptNotificationDelegate()
@@ -34,6 +35,7 @@ struct DoneApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(notesVM)
+                .environmentObject(rewardsVM)
                 .onAppear {
                     NotificationsManager.shared.requestAuthorization()
 
