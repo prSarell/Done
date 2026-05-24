@@ -126,8 +126,8 @@ struct PromptsView: View {
     // false = Once, true = Repeat
     @State private var alertRepeats: Bool = false
 
-    // If true + Date+Repeat: treat as monthly recurrence rather than yearly
-    @State private var alertRepeatMonthly: Bool = false
+    private enum AlertRecurrence { case yearly, fortnightly, monthly }
+    @State private var alertRecurrence: AlertRecurrence = .yearly
 
     // MARK: - Safety gates / debouncers
 
@@ -507,7 +507,7 @@ struct PromptsView: View {
         alertDate = now
         alertTime = now.addingTimeInterval(3600)
         alertRepeats = false      // default Once
-        alertRepeatMonthly = false
+        alertRecurrence = .yearly
 
         if let rule {
             if let wd = rule.weekday {
@@ -536,10 +536,13 @@ struct PromptsView: View {
             }
 
             if rule.monthlyDay != nil || (rule.monthlyIsLastDay ?? false) {
-                alertRepeatMonthly = true
+                alertRecurrence = .monthly
+                alertRepeats = true
+            } else if rule.fortnightlyAnchorDate != nil {
+                alertRecurrence = .fortnightly
                 alertRepeats = true
             } else {
-                alertRepeatMonthly = false
+                alertRecurrence = .yearly
             }
         }
 
@@ -665,12 +668,17 @@ struct PromptsView: View {
                     .pickerStyle(.segmented)
 
                     if alertDateEnabled && alertRepeats {
-                        Toggle("Repeat monthly", isOn: $alertRepeatMonthly)
+                        Picker("Recurrence", selection: $alertRecurrence) {
+                            Text("Yearly").tag(AlertRecurrence.yearly)
+                            Text("Fortnightly").tag(AlertRecurrence.fortnightly)
+                            Text("Monthly").tag(AlertRecurrence.monthly)
+                        }
+                        .pickerStyle(.segmented)
                     }
                 }
 
                 Section {
-                    Text("You can turn on any combination of Day, Date, and Time.\n\nIf both Day and Date are on, the Date will effectively win for scheduling in this version. \"Repeat monthly\" means use the day-of-month (or last day) as a monthly pattern.")
+                    Text("You can turn on any combination of Day, Date, and Time.\n\nIf both Day and Date are on, the Date wins for scheduling. \"Yearly\" repeats on the same date each year. \"Fortnightly\" repeats every 14 days from the selected date. \"Monthly\" repeats on the same day of each month.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -732,7 +740,8 @@ struct PromptsView: View {
         rule.oneOff = !alertRepeats
 
         if alertDateEnabled && alertRepeats {
-            if alertRepeatMonthly {
+            switch alertRecurrence {
+            case .monthly:
                 let comps = cal.dateComponents([.day], from: alertDate)
                 if let d = comps.day {
                     if let range = cal.range(of: .day, in: .month, for: alertDate),
@@ -746,18 +755,29 @@ struct PromptsView: View {
                 }
                 rule.month = nil
                 rule.day = nil
-            } else {
+                rule.fortnightlyAnchorDate = nil
+
+            case .fortnightly:
+                rule.fortnightlyAnchorDate = alertDate
+                rule.monthlyDay = nil
+                rule.monthlyIsLastDay = nil
+                rule.month = nil
+                rule.day = nil
+
+            case .yearly:
                 let comps = cal.dateComponents([.month, .day], from: alertDate)
                 rule.month = comps.month
                 rule.day = comps.day
                 rule.monthlyDay = nil
                 rule.monthlyIsLastDay = nil
+                rule.fortnightlyAnchorDate = nil
             }
         } else {
             rule.month = nil
             rule.day = nil
             rule.monthlyDay = nil
             rule.monthlyIsLastDay = nil
+            rule.fortnightlyAnchorDate = nil
         }
 
         rules[key] = rule

@@ -1,12 +1,15 @@
 import SwiftUI
+import Charts
 
 struct StatsView: View {
     enum Period: String, CaseIterable {
-        case week = "Week"
+        case day   = "Day"
+        case week  = "Week"
         case month = "Month"
-        case year = "Year"
+        case year  = "Year"
     }
 
+    @EnvironmentObject private var notesVM: TimerNotesViewModel
     @State private var period: Period = .week
     @State private var events: [PromptActionEvent] = []
 
@@ -15,23 +18,22 @@ struct StatsView: View {
             List {
                 pickerSection
                 summarySection
-                activitySection
+                chartSection
+                focusSection
+                timerSummarySection
+                timerChartSection
             }
             .navigationTitle("Stats")
-            .task {
-                events = PromptStatusStore.load()
-            }
+            .task { events = PromptStatusStore.load() }
         }
     }
 
-    // MARK: - Sections
+    // MARK: - Prompt sections
 
     private var pickerSection: some View {
         Section {
             Picker("Period", selection: $period) {
-                ForEach(Period.allCases, id: \.self) { p in
-                    Text(p.rawValue).tag(p)
-                }
+                ForEach(Period.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
         }
@@ -51,30 +53,65 @@ struct StatsView: View {
         }
     }
 
-    @ViewBuilder
-    private var activitySection: some View {
-        if filteredEvents.isEmpty {
-            Section {
+    private var chartSection: some View {
+        Section {
+            if filteredEvents.isEmpty {
                 Text("No activity this \(period.rawValue.lowercased()).")
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 40)
+            } else {
+                Chart(chartData) { point in
+                    BarMark(
+                        x: .value("Date", point.date, unit: xUnit),
+                        y: .value("Count", point.count)
+                    )
+                    .foregroundStyle(by: .value("Action", point.actionLabel))
+                    .cornerRadius(4)
+                }
+                .chartForegroundStyleScale([
+                    "Done":    Color.green,
+                    "Skipped": Color(.systemGray4)
+                ])
+                .chartLegend(position: .top, alignment: .trailing)
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: xStride, count: xStrideCount)) { _ in
+                        AxisGridLine()
+                        AxisValueLabel(format: xFormat, centered: true)
+                    }
+                }
+                .frame(height: 180)
+                .padding(.vertical, 8)
             }
-        } else {
-            Section("Activity") {
-                ForEach(filteredEvents) { event in
-                    HStack(spacing: 12) {
-                        Image(systemName: event.action == .done
-                              ? "checkmark.circle.fill"
-                              : "forward.circle.fill")
-                            .foregroundStyle(event.action == .done ? .green : .secondary)
-                            .font(.title3)
+        }
+    }
 
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(event.promptText)
-                                .lineLimit(2)
-                            Text(event.occurredAt, style: .relative)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+    @ViewBuilder
+    private var focusSection: some View {
+        let top = topPrompts
+        if !top.isEmpty {
+            Section("Where your focus went") {
+                ForEach(top, id: \.text) { item in
+                    HStack(spacing: 10) {
+                        Text(item.text)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        GeometryReader { geo in
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color.green.opacity(0.2))
+                                .overlay(alignment: .leading) {
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(Color.green)
+                                        .frame(width: geo.size.width * CGFloat(item.count) / CGFloat(top[0].count))
+                                }
                         }
+                        .frame(width: 80, height: 6)
+
+                        Text("\(item.count)")
+                            .font(.callout.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 24, alignment: .trailing)
                     }
                     .padding(.vertical, 2)
                 }
@@ -82,34 +119,241 @@ struct StatsView: View {
         }
     }
 
-    // MARK: - Helpers
+    // MARK: - Timer sections
 
-    private var filteredEvents: [PromptActionEvent] {
+    private var timerSummarySection: some View {
+        Section("Timer") {
+            if filteredNotes.isEmpty {
+                Text("No timer sessions this \(period.rawValue.lowercased()).")
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 0) {
+                    statCellText("\(filteredNotes.count)", label: "Sessions", color: .accentColor)
+                    Divider()
+                    statCellText(formatDuration(totalSeconds), label: "Total", color: .accentColor)
+                    Divider()
+                    statCellText(formatDuration(averageSeconds), label: "Avg Session", color: .accentColor)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var timerChartSection: some View {
+        if !filteredNotes.isEmpty {
+            Section {
+                Chart(timerChartData) { point in
+                    BarMark(
+                        x: .value("Date", point.date, unit: xUnit),
+                        y: .value("Minutes", point.minutes)
+                    )
+                    .foregroundStyle(Color.accentColor.gradient)
+                    .cornerRadius(4)
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: xStride, count: xStrideCount)) { _ in
+                        AxisGridLine()
+                        AxisValueLabel(format: xFormat, centered: true)
+                    }
+                }
+                .chartYAxis {
+                    AxisMarks { value in
+                        AxisGridLine()
+                        AxisValueLabel {
+                            if let mins = value.as(Double.self) {
+                                Text(formatMinutes(mins))
+                                    .font(.caption2)
+                            }
+                        }
+                    }
+                }
+                .frame(height: 160)
+                .padding(.vertical, 8)
+            }
+        }
+    }
+
+    // MARK: - Timer helpers
+
+    private struct TimerChartPoint: Identifiable {
+        let id = UUID()
+        let date: Date
+        let minutes: Double
+    }
+
+    private var filteredNotes: [TimerNote] {
         let cal = Calendar.current
         let now = Date()
-
         let component: Calendar.Component = {
             switch period {
+            case .day:   return .day
             case .week:  return .weekOfYear
             case .month: return .month
             case .year:  return .year
             }
         }()
+        guard let interval = cal.dateInterval(of: component, for: now) else { return notesVM.notes }
+        return notesVM.notes.filter { interval.contains($0.createdAt) }
+    }
 
-        guard let interval = cal.dateInterval(of: component, for: now) else {
-            return events
+    private var totalSeconds: Int { filteredNotes.reduce(0) { $0 + $1.durationSeconds } }
+
+    private var averageSeconds: Int {
+        filteredNotes.isEmpty ? 0 : totalSeconds / filteredNotes.count
+    }
+
+    private var timerChartData: [TimerChartPoint] {
+        let cal = Calendar.current
+        let now = Date()
+
+        let bucketStarts: [Date]
+        switch period {
+        case .day:
+            guard let dayStart = cal.dateInterval(of: .day, for: now)?.start else { return [] }
+            bucketStarts = (0..<24).compactMap { cal.date(byAdding: .hour, value: $0, to: dayStart) }
+        case .week:
+            guard let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start else { return [] }
+            bucketStarts = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: weekStart) }
+        case .month:
+            guard let monthStart = cal.dateInterval(of: .month, for: now)?.start,
+                  let dayRange = cal.range(of: .day, in: .month, for: now) else { return [] }
+            bucketStarts = (0..<dayRange.count).compactMap { cal.date(byAdding: .day, value: $0, to: monthStart) }
+        case .year:
+            guard let yearStart = cal.dateInterval(of: .year, for: now)?.start else { return [] }
+            bucketStarts = (0..<12).compactMap { cal.date(byAdding: .month, value: $0, to: yearStart) }
         }
 
+        return bucketStarts.compactMap { bucketStart -> TimerChartPoint? in
+            guard let bucketInterval = cal.dateInterval(of: xUnit, for: bucketStart) else { return nil }
+            let seconds = filteredNotes
+                .filter { bucketInterval.contains($0.createdAt) }
+                .reduce(0) { $0 + $1.durationSeconds }
+            return TimerChartPoint(date: bucketStart, minutes: Double(seconds) / 60.0)
+        }
+    }
+
+    private func formatDuration(_ seconds: Int) -> String {
+        guard seconds > 0 else { return "0m" }
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        if h == 0 { return "\(m)m" }
+        return m == 0 ? "\(h)h" : "\(h)h \(m)m"
+    }
+
+    private func formatMinutes(_ minutes: Double) -> String {
+        if minutes < 1 { return "0m" }
+        let h = Int(minutes) / 60
+        let m = Int(minutes) % 60
+        if h == 0 { return "\(m)m" }
+        return m == 0 ? "\(h)h" : "\(h)h \(m)m"
+    }
+
+    // MARK: - Prompt chart helpers
+
+    private struct ChartPoint: Identifiable {
+        let id = UUID()
+        let date: Date
+        let count: Int
+        let actionLabel: String
+    }
+
+    private var xUnit: Calendar.Component {
+        switch period {
+        case .day:          return .hour
+        case .week, .month: return .day
+        case .year:         return .month
+        }
+    }
+
+    private var xStride: Calendar.Component {
+        switch period {
+        case .day:   return .hour
+        case .week:  return .day
+        case .month: return .day
+        case .year:  return .month
+        }
+    }
+
+    private var xStrideCount: Int {
+        switch period {
+        case .day:   return 6
+        case .week:  return 1
+        case .month: return 7
+        case .year:  return 1
+        }
+    }
+
+    private var xFormat: Date.FormatStyle {
+        switch period {
+        case .day:   return .dateTime.hour()
+        case .week:  return .dateTime.weekday(.abbreviated)
+        case .month: return .dateTime.day()
+        case .year:  return .dateTime.month(.abbreviated)
+        }
+    }
+
+    private var chartData: [ChartPoint] {
+        let cal = Calendar.current
+        let now = Date()
+
+        let bucketStarts: [Date]
+        switch period {
+        case .day:
+            guard let dayStart = cal.dateInterval(of: .day, for: now)?.start else { return [] }
+            bucketStarts = (0..<24).compactMap { cal.date(byAdding: .hour, value: $0, to: dayStart) }
+        case .week:
+            guard let weekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start else { return [] }
+            bucketStarts = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: weekStart) }
+        case .month:
+            guard let monthStart = cal.dateInterval(of: .month, for: now)?.start,
+                  let dayRange = cal.range(of: .day, in: .month, for: now) else { return [] }
+            bucketStarts = (0..<dayRange.count).compactMap { cal.date(byAdding: .day, value: $0, to: monthStart) }
+        case .year:
+            guard let yearStart = cal.dateInterval(of: .year, for: now)?.start else { return [] }
+            bucketStarts = (0..<12).compactMap { cal.date(byAdding: .month, value: $0, to: yearStart) }
+        }
+
+        return bucketStarts.flatMap { bucketStart -> [ChartPoint] in
+            guard let bucketInterval = cal.dateInterval(of: xUnit, for: bucketStart) else { return [] }
+            let bucketEvents = filteredEvents.filter { bucketInterval.contains($0.occurredAt) }
+            return [
+                ChartPoint(date: bucketStart, count: bucketEvents.filter { $0.action == .done }.count,    actionLabel: "Done"),
+                ChartPoint(date: bucketStart, count: bucketEvents.filter { $0.action == .skipped }.count, actionLabel: "Skipped")
+            ]
+        }
+    }
+
+    // MARK: - Focus helpers
+
+    private var topPrompts: [(text: String, count: Int)] {
+        var counts: [String: Int] = [:]
+        for event in filteredEvents where event.action == .done {
+            counts[event.promptText, default: 0] += 1
+        }
+        return counts.sorted { $0.value > $1.value }.prefix(5).map { (text: $0.key, count: $0.value) }
+    }
+
+    // MARK: - Filtered events + counts
+
+    private var filteredEvents: [PromptActionEvent] {
+        let cal = Calendar.current
+        let now = Date()
+        let component: Calendar.Component = {
+            switch period {
+            case .day:   return .day
+            case .week:  return .weekOfYear
+            case .month: return .month
+            case .year:  return .year
+            }
+        }()
+        guard let interval = cal.dateInterval(of: component, for: now) else { return events }
         return events.filter { interval.contains($0.occurredAt) }
     }
 
-    private var doneCount: Int {
-        filteredEvents.filter { $0.action == .done }.count
-    }
+    private var doneCount:    Int { filteredEvents.filter { $0.action == .done }.count }
+    private var skippedCount: Int { filteredEvents.filter { $0.action == .skipped }.count }
 
-    private var skippedCount: Int {
-        filteredEvents.filter { $0.action == .skipped }.count
-    }
+    // MARK: - Stat cells
 
     @ViewBuilder
     private func statCell(count: Int, label: String, color: Color) -> some View {
@@ -124,8 +368,25 @@ struct StatsView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
     }
+
+    @ViewBuilder
+    private func statCellText(_ value: String, label: String, color: Color) -> some View {
+        VStack(spacing: 4) {
+            Text(value)
+                .font(.system(.title, design: .rounded).bold())
+                .foregroundStyle(color)
+                .minimumScaleFactor(0.6)
+                .lineLimit(1)
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+    }
 }
 
 #Preview {
     StatsView()
+        .environmentObject(TimerNotesViewModel())
 }

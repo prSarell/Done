@@ -11,6 +11,7 @@ public enum PromptRecurrenceKind: String, Codable {
     case oneOff
     case yearly
     case monthly
+    case fortnightly
 }
 
 public struct PromptRule: Codable, Equatable {
@@ -31,6 +32,9 @@ public struct PromptRule: Codable, Equatable {
     public var monthlyDay: Int?        // 1...31
     public var monthlyIsLastDay: Bool?
 
+    // Fortnightly recurrence — fires every 14 days from this anchor
+    public var fortnightlyAnchorDate: Date?
+
     // Behaviour
     // oneOff == true  -> treat as one-off
     // oneOff == false -> treat as recurring
@@ -48,7 +52,8 @@ public struct PromptRule: Codable, Equatable {
         month: Int? = nil,
         day: Int? = nil,
         monthlyDay: Int? = nil,
-        monthlyIsLastDay: Bool? = nil
+        monthlyIsLastDay: Bool? = nil,
+        fortnightlyAnchorDate: Date? = nil
     ) {
         self.timeHour = timeHour
         self.timeMinute = timeMinute
@@ -60,6 +65,7 @@ public struct PromptRule: Codable, Equatable {
         self.day = day
         self.monthlyDay = monthlyDay
         self.monthlyIsLastDay = monthlyIsLastDay
+        self.fortnightlyAnchorDate = fortnightlyAnchorDate
     }
 
     // MARK: - Existing active-window logic
@@ -124,6 +130,10 @@ public extension PromptRule {
             return .monthly
         }
 
+        if fortnightlyAnchorDate != nil {
+            return .fortnightly
+        }
+
         if weekday != nil {
             return .weekly
         }
@@ -183,6 +193,13 @@ public extension PromptRule {
             } else {
                 dayPart = "Monthly"
             }
+            if let t = timeString() { return "\(dayPart) · \(t)" }
+            return dayPart
+
+        case .fortnightly:
+            let df = DateFormatter()
+            df.dateFormat = "MMM d"
+            let dayPart = fortnightlyAnchorDate.map { "Fortnightly from \(df.string(from: $0))" } ?? "Fortnightly"
             if let t = timeString() { return "\(dayPart) · \(t)" }
             return dayPart
 
@@ -248,6 +265,9 @@ public extension PromptRule {
 
         case .yearly:
             return nextYearlyTarget(after: now, calendar: cal)
+
+        case .fortnightly:
+            return nextFortnightlyTarget(after: now, calendar: cal)
         }
     }
 
@@ -274,6 +294,9 @@ public extension PromptRule {
 
         case .yearly:
             return previousYearlyTarget(before: now, calendar: cal)
+
+        case .fortnightly:
+            return previousFortnightlyTarget(before: now, calendar: cal)
         }
     }
 
@@ -285,7 +308,7 @@ public extension PromptRule {
         case .weekly:
             return cal.startOfDay(for: target)
 
-        case .monthly:
+        case .monthly, .fortnightly:
             return cal.date(byAdding: .day, value: -5, to: cal.startOfDay(for: target))
                 ?? cal.startOfDay(for: target)
 
@@ -377,6 +400,34 @@ private extension PromptRule {
 
         guard let baseDay = cal.date(from: comps) else { return nil }
         return targetDate(forBaseDay: baseDay, calendar: cal)
+    }
+
+    func nextFortnightlyTarget(after now: Date, calendar cal: Calendar) -> Date? {
+        guard let anchor = fortnightlyAnchorDate else { return nil }
+        let anchorDay = cal.startOfDay(for: anchor)
+        let nowDay = cal.startOfDay(for: now)
+        let daysSince = max(0, cal.dateComponents([.day], from: anchorDay, to: nowDay).day ?? 0)
+        let periodsElapsed = daysSince / 14
+        for offset in 0...1 {
+            guard let candidate = cal.date(byAdding: .day, value: (periodsElapsed + offset) * 14, to: anchorDay) else { continue }
+            let target = targetDate(forBaseDay: candidate, calendar: cal)
+            if target >= now { return target }
+        }
+        return nil
+    }
+
+    func previousFortnightlyTarget(before now: Date, calendar cal: Calendar) -> Date? {
+        guard let anchor = fortnightlyAnchorDate else { return nil }
+        let anchorDay = cal.startOfDay(for: anchor)
+        let nowDay = cal.startOfDay(for: now)
+        let daysSince = max(0, cal.dateComponents([.day], from: anchorDay, to: nowDay).day ?? 0)
+        let periodsElapsed = daysSince / 14
+        for offset in 0...1 {
+            guard let candidate = cal.date(byAdding: .day, value: (periodsElapsed - offset) * 14, to: anchorDay) else { continue }
+            let target = targetDate(forBaseDay: candidate, calendar: cal)
+            if target <= now { return target }
+        }
+        return nil
     }
 
     func nextYearlyTarget(after now: Date, calendar cal: Calendar) -> Date? {

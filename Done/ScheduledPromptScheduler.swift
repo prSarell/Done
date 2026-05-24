@@ -242,7 +242,7 @@ final class ScheduledPromptScheduler {
                 calendar: cal
             )
 
-        case .weekly, .monthly, .yearly:
+        case .weekly, .monthly, .yearly, .fortnightly:
             return currentOrNextTargetForRecurring(
                 prompt: prompt,
                 rule: rule,
@@ -525,7 +525,7 @@ final class ScheduledPromptScheduler {
                 return cal.startOfDay(for: target).addingTimeInterval(24 * 60 * 60)
             }
 
-        case .monthly, .yearly:
+        case .monthly, .yearly, .fortnightly:
             if rule.timeHour != nil, rule.timeMinute != nil {
                 return target.addingTimeInterval(24 * 60 * 60)
             } else {
