@@ -60,6 +60,7 @@ final class RandomPromptScheduler {
     /// Call on app launch / when prompts change. Plans *today’s* notifications once.
     func refreshScheduleToday(
         allPrompts: [PromptItem],
+        workPromptIDs: Set<UUID> = [],
         rules: RandomPromptRules = .init(),
         forceRebuild: Bool = false
     ) {
@@ -138,6 +139,7 @@ final class RandomPromptScheduler {
             // Continue planning after cleanup
             self.planNow(
                 allPrompts: allPrompts,
+                workPromptIDs: workPromptIDs,
                 rules: rules,
                 history: history,
                 todayKey: todayKey,
@@ -151,6 +153,7 @@ final class RandomPromptScheduler {
 
     private func planNow(
         allPrompts: [PromptItem],
+        workPromptIDs: Set<UUID>,
         rules: RandomPromptRules,
         history: History,
         todayKey: String,
@@ -286,7 +289,12 @@ final class RandomPromptScheduler {
         var scheduledCount = 0
 
         for (i, time) in times.enumerated() {
-            let eligible = PromptSelector.eligible(from: pool, rules: perPromptRules, at: time, cal: cal)
+            var eligible = PromptSelector.eligible(from: pool, rules: perPromptRules, at: time, cal: cal)
+
+            // Work prompts only appear Mon–Fri 9am–5pm
+            if !workPromptIDs.isEmpty && !Self.isWorkHours(at: time, cal: cal) {
+                eligible = eligible.filter { !workPromptIDs.contains($0.id) }
+            }
 
             guard let next = pickNextPrompt(fromEligible: eligible, lastText: lastText, rng: &rng) else {
                 continue
@@ -344,6 +352,16 @@ final class RandomPromptScheduler {
         }
 
         return eligible.randomElement(using: &rng) ?? eligible.first
+    }
+
+    // MARK: - Work-hours gate
+
+    /// True when `date` falls on a weekday (Mon–Fri) between 9am and 5pm.
+    private static func isWorkHours(at date: Date, cal: Calendar) -> Bool {
+        let weekday = cal.component(.weekday, from: date) // 1 = Sun, 7 = Sat
+        guard weekday >= 2 && weekday <= 6 else { return false }
+        let hour = cal.component(.hour, from: date)
+        return hour >= 9 && hour < 17
     }
 
     // MARK: - IDs / History IO

@@ -161,6 +161,7 @@ struct PromptsView: View {
             if Task.isCancelled { return }
             RandomPromptScheduler.shared.refreshScheduleToday(
                 allPrompts: allPromptItems,
+                workPromptIDs: Set(workItems.map(\.id)),
                 forceRebuild: forceRebuild
             )
         }
@@ -196,6 +197,7 @@ struct PromptsView: View {
             // Plan once based on loaded data (NOT repeatedly during load)
             RandomPromptScheduler.shared.refreshScheduleToday(
                 allPrompts: allPromptItems,
+                workPromptIDs: Set(workItems.map(\.id)),
                 forceRebuild: true
             )
         }

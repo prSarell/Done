@@ -44,7 +44,10 @@ struct DoneApp: App {
                         performOneOffCleanup()
 
                         let prompts = loadAllPromptsFromDisk()
-                        RandomPromptScheduler.shared.refreshScheduleToday(allPrompts: prompts)
+                        RandomPromptScheduler.shared.refreshScheduleToday(
+                            allPrompts: prompts,
+                            workPromptIDs: loadWorkPromptIDsFromDisk()
+                        )
 
                         UNUserNotificationCenter.current().getPendingNotificationRequests { reqs in
                             print("Pending notifications:", reqs.count)
@@ -57,7 +60,10 @@ struct DoneApp: App {
                         didPlanThisForeground = true
 
                         let prompts = loadAllPromptsFromDisk()
-                        RandomPromptScheduler.shared.refreshScheduleToday(allPrompts: prompts)
+                        RandomPromptScheduler.shared.refreshScheduleToday(
+                            allPrompts: prompts,
+                            workPromptIDs: loadWorkPromptIDsFromDisk()
+                        )
                     }
                 }
                 // When leaving foreground, reset the gate so next foreground can plan once
@@ -79,6 +85,12 @@ private struct PromptsState: Codable {
     var eventsItems:       [PromptItem] = []
     var studyItems:        [PromptItem] = []
     var mentalHealthItems: [PromptItem] = []
+}
+
+/// Returns UUIDs of Work-category prompts for time-gating in the random scheduler.
+private func loadWorkPromptIDsFromDisk() -> Set<UUID> {
+    guard let s = loadPromptsStateSafe() else { return [] }
+    return Set(s.workItems.map(\.id))
 }
 
 /// Returns all prompt items across all categories for scheduling.
