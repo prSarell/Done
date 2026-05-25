@@ -14,13 +14,13 @@ import UserNotifications
 final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
 
     // Category + Action IDs
-    static let categoryID = "prompt-actions"
-    static let actionDoneID = "prompt-done"
-    static let actionSkipID = "prompt-skip"
+    nonisolated static let categoryID = "prompt-actions"
+    nonisolated static let actionDoneID = "prompt-done"
+    nonisolated static let actionSkipID = "prompt-skip"
 
     // Keys in content.userInfo
-    static let kPromptID = "prompt_id"
-    static let kPromptText = "prompt_text"
+    nonisolated static let kPromptID = "prompt_id"
+    nonisolated static let kPromptText = "prompt_text"
 
     // Show banner while app open
     func userNotificationCenter(_ center: UNUserNotificationCenter,
