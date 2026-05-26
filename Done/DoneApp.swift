@@ -51,6 +51,10 @@ struct DoneApp: App {
                             workPromptIDs: loadWorkPromptIDsFromDisk()
                         )
 
+                        NotificationsManager.shared.scheduleDailySummary(
+                            doneCount: doneTodayCount()
+                        )
+
                         UNUserNotificationCenter.current().getPendingNotificationRequests { reqs in
                             print("Pending notifications:", reqs.count)
                         }
@@ -65,6 +69,10 @@ struct DoneApp: App {
                         RandomPromptScheduler.shared.refreshScheduleToday(
                             allPrompts: prompts,
                             workPromptIDs: loadWorkPromptIDsFromDisk()
+                        )
+
+                        NotificationsManager.shared.scheduleDailySummary(
+                            doneCount: doneTodayCount()
                         )
                     }
                 }
@@ -214,4 +222,12 @@ private func performOneOffCleanup() {
     PromptRulesStore.save(rules)
 
     print("OneOffCleanup: removed \(toDeleteTexts.count) dated prompts: \(toDeleteTexts)")
+}
+
+// MARK: - Daily summary helper
+
+private func doneTodayCount() -> Int {
+    PromptStatusStore.load()
+        .filter { $0.action == .done && Calendar.current.isDateInToday($0.occurredAt) }
+        .count
 }

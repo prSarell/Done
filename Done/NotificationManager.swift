@@ -122,6 +122,26 @@ final class NotificationsManager {
         }
     }
 
+    func scheduleDailySummary(doneCount: Int) {
+        let id = "daily-summary-\(Self.todayKey())"
+        cancel(id: id)
+
+        var comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        comps.hour = 21
+        comps.minute = 0
+        comps.second = 0
+        guard let fireDate = Calendar.current.date(from: comps), fireDate > Date() else { return }
+
+        let noun = doneCount == 1 ? "task" : "tasks"
+        scheduleOneOff(id: id, title: "\(doneCount) \(noun) Done today!", at: fireDate)
+    }
+
+    private static func todayKey() -> String {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        return df.string(from: Date())
+    }
+
     func cancel(id: String) {
         let center = UNUserNotificationCenter.current()
 

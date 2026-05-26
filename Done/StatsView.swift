@@ -12,6 +12,8 @@ struct StatsView: View {
     @EnvironmentObject private var notesVM: TimerNotesViewModel
     @State private var period: Period = .week
     @State private var events: [PromptActionEvent] = []
+    @State private var focusExpanded = false
+    @State private var timerFocusExpanded = false
 
     var body: some View {
         NavigationStack {
@@ -22,9 +24,11 @@ struct StatsView: View {
                 focusSection
                 timerSummarySection
                 timerChartSection
+                timerFocusSection
             }
             .navigationTitle("Stats")
             .task { events = PromptStatusStore.load() }
+            .onChange(of: period) { focusExpanded = false; timerFocusExpanded = false }
         }
     }
 
@@ -91,7 +95,7 @@ struct StatsView: View {
         let top = topPrompts
         if !top.isEmpty {
             Section("Where your focus went") {
-                ForEach(top, id: \.text) { item in
+                ForEach(visibleFocusPrompts, id: \.text) { item in
                     HStack(spacing: 10) {
                         Text(item.text)
                             .lineLimit(1)
@@ -114,6 +118,17 @@ struct StatsView: View {
                             .frame(width: 24, alignment: .trailing)
                     }
                     .padding(.vertical, 2)
+                }
+
+                if top.count > 5 {
+                    Button {
+                        withAnimation { focusExpanded.toggle() }
+                    } label: {
+                        Text(focusExpanded ? "Show less" : "Show all \(top.count)")
+                            .font(.subheadline)
+                            .foregroundStyle(Color.accentColor)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
                 }
             }
         }
@@ -171,6 +186,65 @@ struct StatsView: View {
                 .padding(.vertical, 8)
             }
         }
+    }
+
+    // MARK: - Timer focus section
+
+    @ViewBuilder
+    private var timerFocusSection: some View {
+        let all = topTimerFocus
+        if !all.isEmpty {
+            Section("Where your time went") {
+                ForEach(visibleTimerFocus, id: \.text) { item in
+                    HStack(spacing: 10) {
+                        Text(item.text)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        GeometryReader { geo in
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color.accentColor.opacity(0.2))
+                                .overlay(alignment: .leading) {
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(Color.accentColor)
+                                        .frame(width: geo.size.width * CGFloat(item.totalSeconds) / CGFloat(all[0].totalSeconds))
+                                }
+                        }
+                        .frame(width: 80, height: 6)
+
+                        Text(formatDuration(item.totalSeconds))
+                            .font(.callout.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                if all.count > 5 {
+                    Button {
+                        withAnimation { timerFocusExpanded.toggle() }
+                    } label: {
+                        Text(timerFocusExpanded ? "Show less" : "Show all \(all.count)")
+                            .font(.subheadline)
+                            .foregroundStyle(Color.accentColor)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                }
+            }
+        }
+    }
+
+    private var topTimerFocus: [(text: String, totalSeconds: Int)] {
+        var totals: [String: Int] = [:]
+        for note in filteredNotes where !note.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            totals[note.text, default: 0] += note.durationSeconds
+        }
+        return totals.sorted { $0.value > $1.value }.map { (text: $0.key, totalSeconds: $0.value) }
+    }
+
+    private var visibleTimerFocus: [(text: String, totalSeconds: Int)] {
+        let all = topTimerFocus
+        return timerFocusExpanded ? all : Array(all.prefix(5))
     }
 
     // MARK: - Timer helpers
@@ -330,7 +404,12 @@ struct StatsView: View {
         for event in filteredEvents where event.action == .done {
             counts[event.promptText, default: 0] += 1
         }
-        return counts.sorted { $0.value > $1.value }.prefix(5).map { (text: $0.key, count: $0.value) }
+        return counts.sorted { $0.value > $1.value }.map { (text: $0.key, count: $0.value) }
+    }
+
+    private var visibleFocusPrompts: [(text: String, count: Int)] {
+        let top = topPrompts
+        return focusExpanded ? top : Array(top.prefix(5))
     }
 
     // MARK: - Filtered events + counts
