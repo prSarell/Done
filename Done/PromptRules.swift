@@ -40,6 +40,9 @@ public struct PromptRule: Codable, Equatable {
     // oneOff == false -> treat as recurring
     // oneOff == nil   -> legacy: if date != nil, treated as one-off by default
     public var oneOff: Bool?
+
+    // Importance weighting — true means this prompt appears more often in the random feed
+    public var isImportant: Bool?
     public var windowMinutes: Int = 120 // active window centered on time (default ±60m)
 
     public init(

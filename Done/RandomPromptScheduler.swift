@@ -277,11 +277,15 @@ final class RandomPromptScheduler {
             return
         }
 
-        // Deterministic pool shuffle
+        // Deterministic pool shuffle — important prompts are duplicated to weight them higher
         let seedInt = todayKey.hashValue ^ candidates.count
         let seed = UInt64(bitPattern: Int64(seedInt))
         var rng = SeededRandom(seed: seed)
-        var pool = candidates
+        var pool: [PromptItem] = []
+        for prompt in candidates {
+            let weight = perPromptRules[prompt.text]?.isImportant == true ? rules.weightImportant : 1
+            for _ in 0..<weight { pool.append(prompt) }
+        }
         pool.shuffle(using: &rng)
 
         var scheduledIDs: [String] = []

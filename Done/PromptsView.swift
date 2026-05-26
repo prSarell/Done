@@ -59,12 +59,19 @@ private struct CategoryTabButton: View {
 private struct PromptRow: View {
     let item: PromptItem
     let alertLabel: String
+    let isImportant: Bool
     let onAlertTap: () -> Void
     let onDone: () -> Void
     let onSkip: () -> Void
+    let onToggleImportant: () -> Void
 
     var body: some View {
         HStack {
+            if isImportant {
+                Image(systemName: "star.fill")
+                    .foregroundStyle(.yellow)
+                    .font(.caption)
+            }
             Text(item.text)
                 .lineLimit(2)
             Spacer()
@@ -87,6 +94,12 @@ private struct PromptRow: View {
             }
             Button { onSkip() } label: {
                 Label("Skip", systemImage: "forward.circle.fill")
+            }
+            Button { onToggleImportant() } label: {
+                Label(
+                    isImportant ? "Remove Important" : "Mark Important",
+                    systemImage: isImportant ? "star.slash" : "star"
+                )
             }
         }
     }
@@ -356,9 +369,11 @@ struct PromptsView: View {
                     PromptRow(
                         item: item,
                         alertLabel: alertLabel(for: item),
+                        isImportant: rules[item.text]?.isImportant == true,
                         onAlertTap: { startEditingAlert(for: item) },
                         onDone: { markPrompt(item, action: .done) },
-                        onSkip: { markPrompt(item, action: .skipped) }
+                        onSkip: { markPrompt(item, action: .skipped) },
+                        onToggleImportant: { toggleImportant(item) }
                     )
                 }
                 .onDelete { indexSet in
@@ -398,14 +413,20 @@ struct PromptsView: View {
         // Done removes the prompt unless it is a repeating schedule (those come back by design)
         if action == .done {
             switch rules[item.text]?.recurrenceKind {
-            case .weekly, .monthly, .yearly:
-                break  // keep repeating prompts in the list
-            default:
+            case nil, .none?, .oneOff:
                 removePrompt(item)
+            default:
+                break  // keep repeating prompts in the list
             }
         }
 
         scheduleRandomPromptsDebounced(forceRebuild: true)
+    }
+
+    private func toggleImportant(_ item: PromptItem) {
+        var rule = rules[item.text] ?? PromptRule()
+        rule.isImportant = !(rule.isImportant ?? false)
+        rules[item.text] = rule
     }
 
     private func removePrompt(_ item: PromptItem) {
@@ -506,7 +527,7 @@ struct PromptsView: View {
         alertWeekday = cal.component(.weekday, from: now)
         alertDate = now
         alertTime = now.addingTimeInterval(3600)
-        alertRepeats = false      // default Once
+        alertRepeats = true       // default Repeat
         alertRecurrence = .yearly
 
         if let rule {
@@ -799,8 +820,8 @@ struct PromptsView: View {
         let shouldRemove: (PromptItem) -> Bool = { [rules] item in
             guard doneIDs.contains(item.id) else { return false }
             switch rules[item.text]?.recurrenceKind {
-            case .weekly, .monthly, .yearly: return false
-            default: return true
+            case nil, .none?, .oneOff: return true
+            default: return false  // keep repeating prompts in the list
             }
         }
 
