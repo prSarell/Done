@@ -275,7 +275,11 @@ private struct DialView: View {
     private let strokeWidth: CGFloat = 14
 
     private var displaySeconds: Int {
-        phase == .setting ? targetSeconds : elapsedSeconds
+        guard phase != .setting else { return targetSeconds }
+        guard targetSeconds > 0 else { return elapsedSeconds }
+        return elapsedSeconds <= targetSeconds
+            ? targetSeconds - elapsedSeconds
+            : elapsedSeconds - targetSeconds
     }
 
     // Completed full hours while in setting mode (drives the dimmed background ring)
@@ -296,6 +300,21 @@ private struct DialView: View {
         }
     }
 
+    // Which lap we're on (0 = first run, 1 = first overtime, 2 = second run, …)
+    private var currentLap: Int {
+        guard phase != .setting, targetSeconds > 0 else { return 0 }
+        return elapsedSeconds / targetSeconds
+    }
+
+    // Progress within the current lap (0→1)
+    private var lapProgress: Double {
+        guard phase != .setting, targetSeconds > 0 else { return 0 }
+        return Double(elapsedSeconds % targetSeconds) / Double(targetSeconds)
+    }
+
+    private var activeLapColor: Color { currentLap % 2 == 0 ? .accentColor : .green }
+    private var baseLapColor:   Color { currentLap % 2 == 1 ? .accentColor : .green }
+
     var body: some View {
         GeometryReader { geo in
             let sz = min(geo.size.width, geo.size.height)
@@ -312,13 +331,31 @@ private struct DialView: View {
                         .stroke(arcColor.opacity(0.25), lineWidth: strokeWidth)
                 }
 
-                // Progress arc
-                if progress > 0 {
+                // Base arc: full ring in the previous lap's colour (lap 1 onwards)
+                if currentLap > 0 {
                     Circle()
-                        .trim(from: 0, to: progress)
-                        .stroke(arcColor, style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round))
+                        .trim(from: 0, to: 1.0)
+                        .stroke(baseLapColor, style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round))
                         .rotationEffect(.degrees(-90))
-                        .animation(phase == .running ? .linear(duration: 1) : .none, value: progress)
+                }
+
+                // Active arc: grows from 0 each lap; .id resets it cleanly so it never
+                // animates backwards when switching roles between laps.
+                if phase == .setting {
+                    if progress > 0 {
+                        Circle()
+                            .trim(from: 0, to: progress)
+                            .stroke(Color.accentColor, style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                    }
+                } else if targetSeconds > 0 {
+                    Circle()
+                        .trim(from: 0, to: max(lapProgress, currentLap > 0 ? 0.001 : 0))
+                        .stroke(activeLapColor, style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .animation(phase == .running ? .linear(duration: 1) : .none, value: lapProgress)
+                        .id(currentLap)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.4)))
                 }
 
                 // Tick marks
