@@ -22,6 +22,7 @@ struct TimerView: View {
     @State private var timerHandle: Timer?
     @State private var showCompleteSheet = false
     @State private var noteText = ""
+    @State private var pendingSheet = false
     @State private var rewardMessage: String? = nil
     @State private var rewardColor: Color = .blue
 
@@ -72,6 +73,10 @@ struct TimerView: View {
                     withAnimation(.easeOut(duration: 0.25)) {
                         rewardMessage = nil
                     }
+                    if pendingSheet {
+                        pendingSheet = false
+                        showCompleteSheet = true
+                    }
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
@@ -103,7 +108,7 @@ struct TimerView: View {
                 Button("Complete") {
                     pauseTimer()
                     noteText = ""
-                    showCompleteSheet = true
+                    triggerCompleteFlow()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
@@ -120,7 +125,7 @@ struct TimerView: View {
 
                 Button("Complete") {
                     noteText = ""
-                    showCompleteSheet = true
+                    triggerCompleteFlow()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
@@ -161,32 +166,36 @@ struct TimerView: View {
                             text: text.isEmpty ? "Timer session" : text,
                             durationSeconds: elapsedSeconds
                         )
-
-                        let shouldReward: Bool
-                        switch mode {
-                        case .personalBest:
-                            // Beat the target
-                            shouldReward = targetSeconds > 0 && elapsedSeconds < targetSeconds
-                        case .focus:
-                            // Went longer than planned
-                            shouldReward = targetSeconds > 0 && elapsedSeconds > targetSeconds
-                        }
-
                         resetTimer()
                         showCompleteSheet = false
-
-                        if shouldReward {
-                            let msg = rewardsVM.triggerRandomReward()
-                            rewardColor = Self.rewardColors.randomElement() ?? .blue
-                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                                rewardMessage = msg
-                            }
-                        }
                     }
                 }
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    // MARK: - Complete flow
+
+    private func triggerCompleteFlow() {
+        let shouldReward: Bool
+        switch mode {
+        case .personalBest:
+            shouldReward = targetSeconds > 0 && elapsedSeconds < targetSeconds
+        case .focus:
+            shouldReward = targetSeconds > 0 && elapsedSeconds > targetSeconds
+        }
+
+        if shouldReward {
+            let msg = rewardsVM.triggerRandomReward()
+            rewardColor = Self.rewardColors.randomElement() ?? .blue
+            pendingSheet = true
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                rewardMessage = msg
+            }
+        } else {
+            showCompleteSheet = true
+        }
     }
 
     // MARK: - Timer control
