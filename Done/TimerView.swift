@@ -78,7 +78,10 @@ struct TimerView: View {
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: rewardMessage != nil)
         .navigationTitle("Timer")
-        .onDisappear { timerHandle?.invalidate() }
+        .onDisappear {
+            timerHandle?.invalidate()
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
         .sheet(isPresented: $showCompleteSheet) { completeSheet }
     }
 
@@ -190,6 +193,7 @@ struct TimerView: View {
 
     private func startTimer() {
         phase = .running
+        UIApplication.shared.isIdleTimerDisabled = true
         timerHandle?.invalidate()
         timerHandle = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             elapsedSeconds += 1
@@ -198,11 +202,13 @@ struct TimerView: View {
 
     private func pauseTimer() {
         phase = .paused
+        UIApplication.shared.isIdleTimerDisabled = false
         timerHandle?.invalidate()
     }
 
     private func resetTimer() {
         timerHandle?.invalidate()
+        UIApplication.shared.isIdleTimerDisabled = false
         phase = .setting
         elapsedSeconds = 0
         targetSeconds = 0
