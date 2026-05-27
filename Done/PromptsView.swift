@@ -877,6 +877,28 @@ struct PromptsView: View {
 
     private func loadRules() {
         rules = PromptRulesStore.load()
+        repairCorruptedRules()
+    }
+
+    /// Fixes rules where oneOff=true was accidentally written over a real recurrence structure
+    /// (weekday, monthly, fortnightly, or yearly fields). oneOff=true only makes sense alongside
+    /// an explicit date or a bare time — pairing it with recurrence fields is always wrong.
+    private func repairCorruptedRules() {
+        var changed = false
+        for (key, rule) in rules {
+            guard rule.oneOff == true else { continue }
+            let hasRecurrence = rule.weekday != nil
+                || rule.monthlyDay != nil
+                || (rule.monthlyIsLastDay ?? false)
+                || rule.fortnightlyAnchorDate != nil
+                || (rule.month != nil && rule.day != nil)
+            guard hasRecurrence else { continue }
+            var fixed = rule
+            fixed.oneOff = false
+            rules[key] = fixed
+            changed = true
+        }
+        if changed { saveRules() }
     }
 
     private func saveRules() {

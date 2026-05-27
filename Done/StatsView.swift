@@ -14,6 +14,8 @@ struct StatsView: View {
     @State private var events: [PromptActionEvent] = []
     @State private var focusExpanded = false
     @State private var timerFocusExpanded = false
+    @State private var importantGeneral: [String] = []
+    @State private var importantWork: [String] = []
 
     var body: some View {
         NavigationStack {
@@ -25,9 +27,15 @@ struct StatsView: View {
                 timerSummarySection
                 timerChartSection
                 timerFocusSection
+                importantGeneralSection
+                importantWorkSection
             }
             .navigationTitle("Stats")
-            .task { events = PromptStatusStore.load() }
+            .task {
+                events = PromptStatusStore.load()
+                loadImportantPrompts()
+            }
+            .onAppear { loadImportantPrompts() }
             .onChange(of: period) { focusExpanded = false; timerFocusExpanded = false }
         }
     }
@@ -232,6 +240,67 @@ struct StatsView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Important prompt sections
+
+    @ViewBuilder
+    private var importantGeneralSection: some View {
+        if !importantGeneral.isEmpty {
+            Section("Important General") {
+                ForEach(importantGeneral, id: \.self) { text in
+                    Label(text, systemImage: "star.fill")
+                        .foregroundStyle(.primary)
+                        .symbolRenderingMode(.multicolor)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var importantWorkSection: some View {
+        if !importantWork.isEmpty {
+            Section("Important Work") {
+                ForEach(importantWork, id: \.self) { text in
+                    Label(text, systemImage: "star.fill")
+                        .foregroundStyle(.primary)
+                        .symbolRenderingMode(.multicolor)
+                }
+            }
+        }
+    }
+
+    private func loadImportantPrompts() {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = docs.appendingPathComponent("prompts.json")
+        guard let data = try? Data(contentsOf: url) else { return }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+
+        struct PromptsShape: Decodable {
+            var dailyItems:        [PromptItem] = []
+            var weeklyItems:       [PromptItem] = []
+            var workItems:         [PromptItem] = []
+            var monthlyItems:      [PromptItem] = []
+            var yearlyItems:       [PromptItem] = []
+            var eventsItems:       [PromptItem] = []
+            var studyItems:        [PromptItem] = []
+            var mentalHealthItems: [PromptItem] = []
+        }
+
+        guard let loaded = try? dec.decode(PromptsShape.self, from: data) else { return }
+        let rules = PromptRulesStore.load()
+
+        let nonWork = loaded.dailyItems + loaded.weeklyItems + loaded.monthlyItems
+            + loaded.yearlyItems + loaded.eventsItems + loaded.studyItems + loaded.mentalHealthItems
+
+        importantGeneral = nonWork
+            .filter { rules[$0.text]?.isImportant == true }
+            .map(\.text)
+
+        importantWork = loaded.workItems
+            .filter { rules[$0.text]?.isImportant == true }
+            .map(\.text)
     }
 
     private var topTimerFocus: [(text: String, totalSeconds: Int)] {
