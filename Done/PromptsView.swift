@@ -412,11 +412,14 @@ struct PromptsView: View {
 
         // Done removes the prompt unless it is a repeating schedule (those come back by design)
         if action == .done {
-            switch rules[item.text]?.recurrenceKind {
-            case nil, .none?, .oneOff:
-                removePrompt(item)
-            default:
-                break  // keep repeating prompts in the list
+            let rule = rules[item.text]
+            if rule?.oneOff != false {
+                switch rule?.recurrenceKind {
+                case nil, .none?, .oneOff:
+                    removePrompt(item)
+                default:
+                    break  // keep repeating prompts in the list
+                }
             }
         }
 
@@ -458,6 +461,11 @@ struct PromptsView: View {
         case .events:       eventsItems.append(newItem)
         case .study:        studyItems.append(newItem)
         case .mentalHealth: mentalHealthItems.append(newItem)
+        }
+
+        // Default all new prompts to repeat so they survive being marked done
+        if rules[newItem.text] == nil {
+            rules[newItem.text] = PromptRule(oneOff: false)
         }
 
         draftText = ""
@@ -527,7 +535,7 @@ struct PromptsView: View {
         alertWeekday = cal.component(.weekday, from: now)
         alertDate = now
         alertTime = now.addingTimeInterval(3600)
-        alertRepeats = true       // default Repeat
+        alertRepeats = true
         alertRecurrence = .yearly
 
         if let rule {
@@ -553,7 +561,13 @@ struct PromptsView: View {
             if let oneOff = rule.oneOff {
                 alertRepeats = !oneOff
             } else {
-                alertRepeats = false
+                // Legacy rule with no explicit oneOff — infer from recurrence structure
+                switch rule.recurrenceKind {
+                case .weekly, .monthly, .yearly, .fortnightly:
+                    alertRepeats = true
+                default:
+                    alertRepeats = false
+                }
             }
 
             if rule.monthlyDay != nil || (rule.monthlyIsLastDay ?? false) {
@@ -819,7 +833,9 @@ struct PromptsView: View {
 
         let shouldRemove: (PromptItem) -> Bool = { [rules] item in
             guard doneIDs.contains(item.id) else { return false }
-            switch rules[item.text]?.recurrenceKind {
+            let rule = rules[item.text]
+            if rule?.oneOff == false { return false }  // explicitly marked repeat, keep it
+            switch rule?.recurrenceKind {
             case nil, .none?, .oneOff: return true
             default: return false  // keep repeating prompts in the list
             }
