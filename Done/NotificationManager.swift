@@ -144,11 +144,8 @@ final class NotificationsManager {
 
     func cancel(id: String) {
         let center = UNUserNotificationCenter.current()
-
-        DispatchQueue.main.async {
-            center.removePendingNotificationRequests(withIdentifiers: [id])
-            center.removeDeliveredNotifications(withIdentifiers: [id])
-        }
+        center.removePendingNotificationRequests(withIdentifiers: [id])
+        center.removeDeliveredNotifications(withIdentifiers: [id])
     }
 
     func cancelAll(prefix: String, completion: (() -> Void)? = nil) {

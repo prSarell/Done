@@ -137,7 +137,7 @@ struct PromptsView: View {
     @State private var alertTime: Date = Date().addingTimeInterval(3600)
 
     // false = Once, true = Repeat
-    @State private var alertRepeats: Bool = false
+    @State private var alertRepeats: Bool = true
 
     private enum AlertRecurrence { case yearly, fortnightly, monthly }
     @State private var alertRecurrence: AlertRecurrence = .yearly
@@ -563,10 +563,10 @@ struct PromptsView: View {
             } else {
                 // Legacy rule with no explicit oneOff — infer from recurrence structure
                 switch rule.recurrenceKind {
-                case .weekly, .monthly, .yearly, .fortnightly:
-                    alertRepeats = true
-                default:
+                case .oneOff:
                     alertRepeats = false
+                default:
+                    alertRepeats = true
                 }
             }
 
@@ -581,7 +581,9 @@ struct PromptsView: View {
             }
         }
 
-        showingAlertSheet = true
+        DispatchQueue.main.async {
+            self.showingAlertSheet = true
+        }
     }
 
     private func alertLabel(for item: PromptItem) -> String {
