@@ -248,7 +248,6 @@ struct PromptsView: View {
             promptsList
         }
         .navigationTitle("Prompts")
-        .toolbar { EditButton() }
         .task {
             // Important: gate all onChange saves until load + rules load completed
             hasFinishedInitialLoad = false
