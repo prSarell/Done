@@ -61,16 +61,16 @@ final class ScheduledPromptScheduler {
         lastRefreshAt = nowForThrottle
         refreshLock.unlock()
 
-        let rulesByText = PromptRulesStore.load()
+        let rulesByID = PromptRulesStore.load()
         let events = PromptStatusStore.load()
 
         #if DEBUG
-        print("SPS: loaded \(rulesByText.count) rules")
+        print("SPS: loaded \(rulesByID.count) rules")
         print("SPS: loaded \(events.count) prompt action events")
         #endif
 
         let scheduledPrompts = prompts.filter { item in
-            guard let rule = rulesByText[item.text] else {
+            guard let rule = rulesByID[item.id.uuidString] else {
                 #if DEBUG
                 print("SPS: no rule found for prompt '\(item.text)'")
                 #endif
@@ -113,7 +113,7 @@ final class ScheduledPromptScheduler {
             var allRequests: [PendingScheduledNotification] = []
 
             for prompt in scheduledPrompts {
-                guard let rule = rulesByText[prompt.text] else {
+                guard let rule = rulesByID[prompt.id.uuidString] else {
                     #if DEBUG
                     print("SPS: skipped '\(prompt.text)' because its rule disappeared during refresh")
                     #endif

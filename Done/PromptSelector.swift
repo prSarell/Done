@@ -5,7 +5,7 @@ import Foundation
 enum PromptSelector {
 
     /// Returns the subset of prompts that are "active" at `time`,
-    /// according to any PromptRule stored in `rules` keyed by prompt text.
+    /// according to any PromptRule stored in `rules` keyed by prompt item id.
     static func eligible(
         from prompts: [PromptItem],
         rules: [String: PromptRule],
@@ -13,9 +13,9 @@ enum PromptSelector {
         cal: Calendar = .current
     ) -> [PromptItem] {
         return prompts.filter { item in
-            // Look up a rule by the prompt's text.
+            // Look up a rule by the prompt's id.
             // If there's no rule, treat it as always eligible.
-            guard let rule = rules[item.text] else { return true }
+            guard let rule = rules[item.id.uuidString] else { return true }
             return rule.isActive(at: time, calendar: cal)
         }
     }

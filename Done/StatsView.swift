@@ -14,8 +14,8 @@ struct StatsView: View {
     @State private var events: [PromptActionEvent] = []
     @State private var focusExpanded = false
     @State private var timerFocusExpanded = false
-    @State private var importantGeneral: [String] = []
-    @State private var importantWork: [String] = []
+    @State private var importantGeneral: [PromptItem] = []
+    @State private var importantWork: [PromptItem] = []
 
     var body: some View {
         NavigationStack {
@@ -248,8 +248,8 @@ struct StatsView: View {
     private var importantGeneralSection: some View {
         if !importantGeneral.isEmpty {
             Section("Important General") {
-                ForEach(importantGeneral, id: \.self) { text in
-                    Label(text, systemImage: "star.fill")
+                ForEach(importantGeneral) { item in
+                    Label(item.text, systemImage: "star.fill")
                         .foregroundStyle(.primary)
                         .symbolRenderingMode(.multicolor)
                 }
@@ -261,8 +261,8 @@ struct StatsView: View {
     private var importantWorkSection: some View {
         if !importantWork.isEmpty {
             Section("Important Work") {
-                ForEach(importantWork, id: \.self) { text in
-                    Label(text, systemImage: "star.fill")
+                ForEach(importantWork) { item in
+                    Label(item.text, systemImage: "star.fill")
                         .foregroundStyle(.primary)
                         .symbolRenderingMode(.multicolor)
                 }
@@ -271,36 +271,18 @@ struct StatsView: View {
     }
 
     private func loadImportantPrompts() {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let url = docs.appendingPathComponent("prompts.json")
-        guard let data = try? Data(contentsOf: url) else { return }
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
+        guard let state = PromptsStore.loadSafe() else { return }
+        let rules = PromptRulesStore.loadMigratingIfNeeded(using: state.allItems)
 
-        struct PromptsShape: Decodable {
-            var dailyItems:        [PromptItem] = []
-            var weeklyItems:       [PromptItem] = []
-            var workItems:         [PromptItem] = []
-            var monthlyItems:      [PromptItem] = []
-            var yearlyItems:       [PromptItem] = []
-            var eventsItems:       [PromptItem] = []
-            var studyItems:        [PromptItem] = []
-            var mentalHealthItems: [PromptItem] = []
-        }
-
-        guard let loaded = try? dec.decode(PromptsShape.self, from: data) else { return }
-        let rules = PromptRulesStore.load()
-
-        let nonWork = loaded.dailyItems + loaded.weeklyItems + loaded.monthlyItems
-            + loaded.yearlyItems + loaded.eventsItems + loaded.studyItems + loaded.mentalHealthItems
+        let nonWork = state.dailyLists.allItems + state.weeklyLists.allItems + state.monthlyLists.allItems
+            + state.yearlyLists.allItems + state.eventsLists.allItems + state.studyLists.allItems
+            + state.mentalHealthLists.allItems
 
         importantGeneral = nonWork
-            .filter { rules[$0.text]?.isImportant == true }
-            .map(\.text)
+            .filter { rules[$0.id.uuidString]?.isImportant == true }
 
-        importantWork = loaded.workItems
-            .filter { rules[$0.text]?.isImportant == true }
-            .map(\.text)
+        importantWork = state.workLists.allItems
+            .filter { rules[$0.id.uuidString]?.isImportant == true }
     }
 
     private var topTimerFocus: [(text: String, totalSeconds: Int)] {

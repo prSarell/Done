@@ -3,30 +3,6 @@
 import SwiftUI
 import UserNotifications
 
-// Codable-friendly model
-struct PromptItem: Identifiable, Hashable, Codable {
-    var id: UUID
-    var text: String
-
-    init(id: UUID = UUID(), text: String) {
-        self.id = id
-        self.text = text
-    }
-}
-
-enum PromptCategory: String, CaseIterable, Identifiable, Codable {
-    case daily = "Daily"
-    case weekly = "Weekly"
-    case work = "Work"
-    case monthly = "Monthly"
-    case yearly = "Yearly"
-    case events = "Events"
-    case study = "Study"
-    case mentalHealth = "Health"
-
-    var id: String { rawValue }
-}
-
 // Small extracted view to keep the compiler happy
 private struct CategoryTabButton: View {
     let category: PromptCategory
@@ -109,27 +85,53 @@ private struct PromptRow: View {
     }
 }
 
+// Small inline "add item" row, one per sub-list section.
+private struct AddItemRow: View {
+    let placeholder: String
+    let onAdd: (String) -> Void
+
+    @State private var text: String = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField(placeholder, text: $text)
+                .textInputAutocapitalization(.sentences)
+                .focused($focused)
+                .onSubmit { submit() }
+
+            Button("Add") { submit() }
+                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    private func submit() {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        onAdd(trimmed)
+        text = ""
+        focused = false
+    }
+}
+
 struct PromptsView: View {
     @State private var selectedCategory: PromptCategory = .daily
 
-    // Separate lists per category
-    @State private var dailyItems:        [PromptItem] = []
-    @State private var weeklyItems:       [PromptItem] = []
-    @State private var workItems:         [PromptItem] = []
-    @State private var monthlyItems:      [PromptItem] = []
-    @State private var yearlyItems:       [PromptItem] = []
-    @State private var eventsItems:       [PromptItem] = []
-    @State private var studyItems:        [PromptItem] = []
-    @State private var mentalHealthItems: [PromptItem] = []
+    // Separate lists (each holding one or more named sub-lists) per category
+    @State private var dailyLists:        [PromptList] = [PromptList()]
+    @State private var weeklyLists:       [PromptList] = [PromptList()]
+    @State private var workLists:         [PromptList] = [PromptList()]
+    @State private var monthlyLists:      [PromptList] = [PromptList()]
+    @State private var yearlyLists:       [PromptList] = [PromptList()]
+    @State private var eventsLists:       [PromptList] = [PromptList()]
+    @State private var studyLists:        [PromptList] = [PromptList()]
+    @State private var mentalHealthLists: [PromptList] = [PromptList()]
 
-    // Draft input for the single-line add row
-    @State private var draftText: String = ""
-
-    // Rules (keyed by prompt text to match PromptRulesStore)
+    // Rules (keyed by prompt item id, as a UUID string)
     @State private var rules: [String: PromptRule] = [:]
 
     // Unified alert editor state
-    @State private var editingAlertPromptText: String?
+    @State private var editingAlertRuleKey: String?
     @State private var showingAlertSheet = false
 
     @State private var alertDayEnabled: Bool = false
@@ -149,6 +151,13 @@ struct PromptsView: View {
     // Prompt IDs marked done today — greyed out until the day rolls over
     @State private var doneTodayPromptIDs: Set<UUID> = []
 
+    // Sub-list rename / delete state
+    @State private var renamingListID: UUID?
+    @State private var renameText: String = ""
+    @State private var showingRenameAlert = false
+    @State private var listPendingDeletion: (category: PromptCategory, listID: UUID)?
+    @State private var showingDeleteListConfirm = false
+
     // MARK: - Safety gates / debouncers
 
     /// Prevents "load → assign arrays → onChange → save empty" wipes.
@@ -157,21 +166,38 @@ struct PromptsView: View {
     /// Debounce schedule rebuilds so we don’t spam notifications while typing/editing.
     @State private var scheduleTask: Task<Void, Never>?
 
-    @FocusState private var draftFocused: Bool
-
     @Environment(\.scenePhase) private var scenePhase
 
     // MARK: - Derived collections / helpers
 
     private var allPromptItems: [PromptItem] {
-        dailyItems
-        + weeklyItems
-        + workItems
-        + monthlyItems
-        + yearlyItems
-        + eventsItems
-        + studyItems
-        + mentalHealthItems
+        dailyLists.allItems
+        + weeklyLists.allItems
+        + workLists.allItems
+        + monthlyLists.allItems
+        + yearlyLists.allItems
+        + eventsLists.allItems
+        + studyLists.allItems
+        + mentalHealthLists.allItems
+    }
+
+    /// Binding into the `[PromptList]` array backing a given category, so category
+    /// dispatch lives in exactly one place instead of being repeated per-action.
+    private func listsBinding(for category: PromptCategory) -> Binding<[PromptList]> {
+        switch category {
+        case .daily:        return $dailyLists
+        case .weekly:       return $weeklyLists
+        case .work:         return $workLists
+        case .monthly:      return $monthlyLists
+        case .yearly:       return $yearlyLists
+        case .events:       return $eventsLists
+        case .study:        return $studyLists
+        case .mentalHealth: return $mentalHealthLists
+        }
+    }
+
+    private var allCategoryBindings: [Binding<[PromptList]>] {
+        PromptCategory.allCases.map { listsBinding(for: $0) }
     }
 
     private func scheduleRandomPromptsDebounced(forceRebuild: Bool) {
@@ -181,7 +207,7 @@ struct PromptsView: View {
             if Task.isCancelled { return }
             RandomPromptScheduler.shared.refreshScheduleToday(
                 allPrompts: allPromptItems,
-                workPromptIDs: Set(workItems.map(\.id)),
+                workPromptIDs: Set(workLists.allItems.map(\.id)),
                 forceRebuild: forceRebuild
             )
         }
@@ -197,6 +223,26 @@ struct PromptsView: View {
 
     @ViewBuilder
     private var content: some View {
+        contentCore
+            // Rename a sub-list
+            .alert("Rename List", isPresented: $showingRenameAlert) {
+                TextField("List name", text: $renameText)
+                Button("Cancel", role: .cancel) { renamingListID = nil }
+                Button("Save") { commitRename() }
+            }
+            // Delete a sub-list
+            .confirmationDialog(
+                "Delete this list and all its items?",
+                isPresented: $showingDeleteListConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Delete List", role: .destructive) { commitDeleteList() }
+                Button("Cancel", role: .cancel) { listPendingDeletion = nil }
+            }
+    }
+
+    @ViewBuilder
+    private var contentCore: some View {
         VStack(spacing: 12) {
             tabsHeader
             promptsList
@@ -207,8 +253,20 @@ struct PromptsView: View {
             // Important: gate all onChange saves until load + rules load completed
             hasFinishedInitialLoad = false
 
-            await loadFromDiskSafely()
-            loadRules()
+            let (loadedState, loadedRules) = await PromptsStore.loadSafeWithRulesAsync()
+            if let loadedState {
+                dailyLists        = loadedState.dailyLists
+                weeklyLists       = loadedState.weeklyLists
+                workLists         = loadedState.workLists
+                monthlyLists      = loadedState.monthlyLists
+                yearlyLists       = loadedState.yearlyLists
+                eventsLists       = loadedState.eventsLists
+                studyLists        = loadedState.studyLists
+                mentalHealthLists = loadedState.mentalHealthLists
+            }
+            // else: decode failed — keep current in-memory state rather than clobber it
+            rules = loadedRules
+            repairCorruptedRules()
 
             hasFinishedInitialLoad = true
 
@@ -218,19 +276,19 @@ struct PromptsView: View {
             // Plan once based on loaded data (NOT repeatedly during load)
             RandomPromptScheduler.shared.refreshScheduleToday(
                 allPrompts: allPromptItems,
-                workPromptIDs: Set(workItems.map(\.id)),
+                workPromptIDs: Set(workLists.allItems.map(\.id)),
                 forceRebuild: true
             )
         }
         // Save prompts when any category changes
-        .onChange(of: dailyItems)        { _, _ in onPromptsMutated() }
-        .onChange(of: weeklyItems)       { _, _ in onPromptsMutated() }
-        .onChange(of: workItems)         { _, _ in onPromptsMutated() }
-        .onChange(of: monthlyItems)      { _, _ in onPromptsMutated() }
-        .onChange(of: yearlyItems)       { _, _ in onPromptsMutated() }
-        .onChange(of: eventsItems)       { _, _ in onPromptsMutated() }
-        .onChange(of: studyItems)        { _, _ in onPromptsMutated() }
-        .onChange(of: mentalHealthItems) { _, _ in onPromptsMutated() }
+        .onChange(of: dailyLists)        { _, _ in onPromptsMutated() }
+        .onChange(of: weeklyLists)       { _, _ in onPromptsMutated() }
+        .onChange(of: workLists)         { _, _ in onPromptsMutated() }
+        .onChange(of: monthlyLists)      { _, _ in onPromptsMutated() }
+        .onChange(of: yearlyLists)       { _, _ in onPromptsMutated() }
+        .onChange(of: eventsLists)       { _, _ in onPromptsMutated() }
+        .onChange(of: studyLists)        { _, _ in onPromptsMutated() }
+        .onChange(of: mentalHealthLists) { _, _ in onPromptsMutated() }
 
         // Save rules when changed
         .onChange(of: rules) { _, _ in
@@ -318,67 +376,35 @@ struct PromptsView: View {
     @ViewBuilder
     private var promptsList: some View {
         List {
-            addSection
-            listSection(for: selectedCategory)
+            ForEach(listsBinding(for: selectedCategory)) { $list in
+                promptListSection(list: $list, category: selectedCategory)
+            }
+
+            Section {
+                Button {
+                    addList()
+                } label: {
+                    Label("New List", systemImage: "plus.circle")
+                }
+            }
         }
         .listStyle(.insetGrouped)
     }
 
     // MARK: - Sections broken out
 
-    private var addSection: some View {
-        Section(header: Text("Add \(selectedCategory.rawValue) Item")) {
-            HStack(spacing: 8) {
-                TextField(placeholderText, text: $draftText)
-                    .textInputAutocapitalization(.sentences)
-                    .focused($draftFocused)
-                    .onSubmit { addDraft() }
-
-                Button("Add") { addDraft() }
-                    .disabled(addDisabled)
-            }
-        }
-    }
-
-    // Make the list section very simple for the compiler
     @ViewBuilder
-    private func listSection(for category: PromptCategory) -> some View {
-        switch category {
-        case .daily:
-            promptsListSection(title: "Daily List", items: dailyItems, category: .daily)
-        case .weekly:
-            promptsListSection(title: "Weekly List", items: weeklyItems, category: .weekly)
-        case .work:
-            promptsListSection(title: "Work List", items: workItems, category: .work)
-        case .monthly:
-            promptsListSection(title: "Monthly List", items: monthlyItems, category: .monthly)
-        case .yearly:
-            promptsListSection(title: "Yearly List", items: yearlyItems, category: .yearly)
-        case .events:
-            promptsListSection(title: "Events List", items: eventsItems, category: .events)
-        case .study:
-            promptsListSection(title: "Study List", items: studyItems, category: .study)
-        case .mentalHealth:
-            promptsListSection(title: "Health List", items: mentalHealthItems, category: .mentalHealth)
-        }
-    }
-
-    @ViewBuilder
-    private func promptsListSection(
-        title: String,
-        items: [PromptItem],
-        category: PromptCategory
-    ) -> some View {
-        Section(title) {
-            if items.isEmpty {
-                Text("No items yet. Add one above.")
+    private func promptListSection(list: Binding<PromptList>, category: PromptCategory) -> some View {
+        Section {
+            if list.wrappedValue.items.isEmpty {
+                Text("No items yet. Add one below.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(items, id: \.id) { item in
+                ForEach(list.wrappedValue.items, id: \.id) { item in
                     PromptRow(
                         item: item,
                         alertLabel: alertLabel(for: item),
-                        isImportant: rules[item.text]?.isImportant == true,
+                        isImportant: rules[item.id.uuidString]?.isImportant == true,
                         isDoneToday: doneTodayPromptIDs.contains(item.id),
                         onAlertTap: { startEditingAlert(for: item) },
                         onDone: { markPrompt(item, action: .done) },
@@ -387,13 +413,85 @@ struct PromptsView: View {
                     )
                 }
                 .onDelete { indexSet in
-                    deleteItems(at: indexSet, in: category)
+                    deleteItems(at: indexSet, listID: list.wrappedValue.id, in: category)
                 }
+            }
+
+            AddItemRow(placeholder: placeholderText) { text in
+                addItem(text, toListID: list.wrappedValue.id, in: category)
+            }
+        } header: {
+            listSectionHeader(list: list, category: category)
+        }
+    }
+
+    private func listSectionHeader(list: Binding<PromptList>, category: PromptCategory) -> some View {
+        HStack {
+            Text(list.wrappedValue.name)
+            Spacer()
+            Menu {
+                Button {
+                    renamingListID = list.wrappedValue.id
+                    renameText = list.wrappedValue.name
+                    showingRenameAlert = true
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    listPendingDeletion = (category, list.wrappedValue.id)
+                    showingDeleteListConfirm = true
+                } label: {
+                    Label("Delete List", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .foregroundStyle(.secondary)
             }
         }
     }
 
-    // MARK: - Add / Delete
+    // MARK: - Sub-list add / rename / delete
+
+    private func addList() {
+        let binding = listsBinding(for: selectedCategory)
+        let newList = PromptList(name: "New List")
+        binding.wrappedValue.append(newList)
+        renamingListID = newList.id
+        renameText = newList.name
+        showingRenameAlert = true
+    }
+
+    private func commitRename() {
+        defer { renamingListID = nil }
+        guard let id = renamingListID else { return }
+        let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let binding = listsBinding(for: selectedCategory)
+        guard let idx = binding.wrappedValue.firstIndex(where: { $0.id == id }) else { return }
+        binding.wrappedValue[idx].name = trimmed
+    }
+
+    private func commitDeleteList() {
+        defer { listPendingDeletion = nil }
+        guard let (category, listID) = listPendingDeletion else { return }
+
+        let binding = listsBinding(for: category)
+        guard let idx = binding.wrappedValue.firstIndex(where: { $0.id == listID }) else { return }
+
+        let removedItemIDs = binding.wrappedValue[idx].items.map(\.id)
+
+        if binding.wrappedValue.count == 1 {
+            // Never leave a category with zero lists — reset to an empty default instead.
+            binding.wrappedValue[idx] = PromptList()
+        } else {
+            binding.wrappedValue.remove(at: idx)
+        }
+
+        removedItemIDs.forEach { rules[$0.uuidString] = nil }
+    }
+
+    // MARK: - Add / Delete items
 
     private func markPrompt(_ item: PromptItem, action: PromptAction) {
         PromptStatusStore.append(
@@ -423,7 +521,7 @@ struct PromptsView: View {
         // Done removes the prompt unless it is a repeating schedule (those come back by design)
         if action == .done {
             doneTodayPromptIDs.insert(item.id)
-            let rule = rules[item.text]
+            let rule = rules[item.id.uuidString]
             if rule?.oneOff != false {
                 switch rule?.recurrenceKind {
                 case nil, .none?, .oneOff:
@@ -438,101 +536,47 @@ struct PromptsView: View {
     }
 
     private func toggleImportant(_ item: PromptItem) {
-        var rule = rules[item.text] ?? PromptRule()
+        var rule = rules[item.id.uuidString] ?? PromptRule()
         rule.isImportant = !(rule.isImportant ?? false)
-        rules[item.text] = rule
+        rules[item.id.uuidString] = rule
     }
 
     private func removePrompt(_ item: PromptItem) {
-        dailyItems.removeAll        { $0.id == item.id }
-        weeklyItems.removeAll       { $0.id == item.id }
-        workItems.removeAll         { $0.id == item.id }
-        monthlyItems.removeAll      { $0.id == item.id }
-        yearlyItems.removeAll       { $0.id == item.id }
-        eventsItems.removeAll       { $0.id == item.id }
-        studyItems.removeAll        { $0.id == item.id }
-        mentalHealthItems.removeAll { $0.id == item.id }
-        rules[item.text] = nil
-    }
-
-    private var addDisabled: Bool {
-        draftTextTrimmed.isEmpty
-    }
-
-    private func addDraft() {
-        guard !draftTextTrimmed.isEmpty else { return }
-        let newItem = PromptItem(text: draftTextTrimmed)
-
-        switch selectedCategory {
-        case .daily:        dailyItems.append(newItem)
-        case .weekly:       weeklyItems.append(newItem)
-        case .work:         workItems.append(newItem)
-        case .monthly:      monthlyItems.append(newItem)
-        case .yearly:       yearlyItems.append(newItem)
-        case .events:       eventsItems.append(newItem)
-        case .study:        studyItems.append(newItem)
-        case .mentalHealth: mentalHealthItems.append(newItem)
+        for binding in allCategoryBindings {
+            for idx in binding.wrappedValue.indices {
+                binding.wrappedValue[idx].items.removeAll { $0.id == item.id }
+            }
         }
+        rules[item.id.uuidString] = nil
+    }
+
+    private func addItem(_ text: String, toListID listID: UUID, in category: PromptCategory) {
+        let newItem = PromptItem(text: text)
+        let binding = listsBinding(for: category)
+        guard let idx = binding.wrappedValue.firstIndex(where: { $0.id == listID }) else { return }
+        binding.wrappedValue[idx].items.append(newItem)
 
         // Default all new prompts to repeat so they survive being marked done
-        if rules[newItem.text] == nil {
-            rules[newItem.text] = PromptRule(oneOff: false)
+        if rules[newItem.id.uuidString] == nil {
+            rules[newItem.id.uuidString] = PromptRule(oneOff: false)
         }
-
-        draftText = ""
-        draftFocused = false
     }
 
-    private func deleteItems(at indexSet: IndexSet, in category: PromptCategory) {
-        switch category {
-        case .daily:
-            let texts = indexSet.map { dailyItems[$0].text }
-            dailyItems.remove(atOffsets: indexSet)
-            texts.forEach { rules[$0] = nil }
+    private func deleteItems(at indexSet: IndexSet, listID: UUID, in category: PromptCategory) {
+        let binding = listsBinding(for: category)
+        guard let idx = binding.wrappedValue.firstIndex(where: { $0.id == listID }) else { return }
 
-        case .weekly:
-            let texts = indexSet.map { weeklyItems[$0].text }
-            weeklyItems.remove(atOffsets: indexSet)
-            texts.forEach { rules[$0] = nil }
-
-        case .work:
-            let texts = indexSet.map { workItems[$0].text }
-            workItems.remove(atOffsets: indexSet)
-            texts.forEach { rules[$0] = nil }
-
-        case .monthly:
-            let texts = indexSet.map { monthlyItems[$0].text }
-            monthlyItems.remove(atOffsets: indexSet)
-            texts.forEach { rules[$0] = nil }
-
-        case .yearly:
-            let texts = indexSet.map { yearlyItems[$0].text }
-            yearlyItems.remove(atOffsets: indexSet)
-            texts.forEach { rules[$0] = nil }
-
-        case .events:
-            let texts = indexSet.map { eventsItems[$0].text }
-            eventsItems.remove(atOffsets: indexSet)
-            texts.forEach { rules[$0] = nil }
-
-        case .study:
-            let texts = indexSet.map { studyItems[$0].text }
-            studyItems.remove(atOffsets: indexSet)
-            texts.forEach { rules[$0] = nil }
-
-        case .mentalHealth:
-            let texts = indexSet.map { mentalHealthItems[$0].text }
-            mentalHealthItems.remove(atOffsets: indexSet)
-            texts.forEach { rules[$0] = nil }
-        }
+        let removedIDs = indexSet.map { binding.wrappedValue[idx].items[$0].id }
+        binding.wrappedValue[idx].items.remove(atOffsets: indexSet)
+        removedIDs.forEach { rules[$0.uuidString] = nil }
     }
 
     // MARK: - Unified Alert helpers
-    // (UNCHANGED from your version)
+    // (UNCHANGED apart from keying by item id instead of text)
 
     private func startEditingAlert(for item: PromptItem) {
-        let key = item.text
-        editingAlertPromptText = key
+        let key = item.id.uuidString
+        editingAlertRuleKey = key
 
         let now = Date()
         let cal = Calendar.current
@@ -598,7 +642,7 @@ struct PromptsView: View {
     }
 
     private func alertLabel(for item: PromptItem) -> String {
-        let key = item.text
+        let key = item.id.uuidString
         guard let rule = rules[key] else { return "Alert" }
 
         let hasDay = (rule.weekday != nil)
@@ -738,9 +782,9 @@ struct PromptsView: View {
                     Button("Cancel") { showingAlertSheet = false }
                 }
                 ToolbarItem(placement: .destructiveAction) {
-                    if let key = editingAlertPromptText, rules[key] != nil {
+                    if let key = editingAlertRuleKey, rules[key] != nil {
                         Button("Clear") {
-                            if let key = editingAlertPromptText { rules[key] = nil }
+                            if let key = editingAlertRuleKey { rules[key] = nil }
                             showingAlertSheet = false
                         }
                     }
@@ -753,7 +797,7 @@ struct PromptsView: View {
     }
 
     private func saveAlertEdits() {
-        guard let key = editingAlertPromptText else {
+        guard let key = editingAlertRuleKey else {
             showingAlertSheet = false
             return
         }
@@ -846,7 +890,7 @@ struct PromptsView: View {
 
         let shouldRemove: (PromptItem) -> Bool = { [rules] item in
             guard doneIDs.contains(item.id) else { return false }
-            let rule = rules[item.text]
+            let rule = rules[item.id.uuidString]
             if rule?.oneOff == false { return false }  // explicitly marked repeat, keep it
             switch rule?.recurrenceKind {
             case nil, .none?, .oneOff: return true
@@ -854,24 +898,19 @@ struct PromptsView: View {
             }
         }
 
-        let removedTexts = (dailyItems + weeklyItems + workItems + monthlyItems
-            + yearlyItems + eventsItems + studyItems + mentalHealthItems)
-            .filter(shouldRemove)
-            .map { $0.text }
+        var removedIDs: [UUID] = []
+        for binding in allCategoryBindings {
+            for idx in binding.wrappedValue.indices {
+                let removed = binding.wrappedValue[idx].items.filter(shouldRemove)
+                guard !removed.isEmpty else { continue }
+                removedIDs.append(contentsOf: removed.map(\.id))
+                binding.wrappedValue[idx].items.removeAll(where: shouldRemove)
+            }
+        }
 
-        guard !removedTexts.isEmpty else { return }
-
-        dailyItems.removeAll(where: shouldRemove)
-        weeklyItems.removeAll(where: shouldRemove)
-        workItems.removeAll(where: shouldRemove)
-        monthlyItems.removeAll(where: shouldRemove)
-        yearlyItems.removeAll(where: shouldRemove)
-        eventsItems.removeAll(where: shouldRemove)
-        studyItems.removeAll(where: shouldRemove)
-        mentalHealthItems.removeAll(where: shouldRemove)
-
-        for text in removedTexts {
-            rules[text] = nil
+        guard !removedIDs.isEmpty else { return }
+        for id in removedIDs {
+            rules[id.uuidString] = nil
         }
     }
 
@@ -888,20 +927,8 @@ struct PromptsView: View {
 
     // MARK: - Persistence
 
-    private struct PromptsState: Codable {
-        var dailyItems:        [PromptItem] = []
-        var weeklyItems:       [PromptItem] = []
-        var workItems:         [PromptItem] = []
-        var monthlyItems:      [PromptItem] = []
-        var yearlyItems:       [PromptItem] = []
-        var eventsItems:       [PromptItem] = []
-        var studyItems:        [PromptItem] = []
-        var mentalHealthItems: [PromptItem] = []
-    }
-
-    private func loadRules() {
-        rules = PromptRulesStore.load()
-        repairCorruptedRules()
+    private func saveRules() {
+        PromptRulesStore.save(rules)
     }
 
     /// Fixes rules where oneOff=true was accidentally written over a real recurrence structure
@@ -925,107 +952,21 @@ struct PromptsView: View {
         if changed { saveRules() }
     }
 
-    private func saveRules() {
-        PromptRulesStore.save(rules)
-    }
-
-    /// Safe async load:
-    /// - If file doesn't exist: loads empty (first run) and that's fine.
-    /// - If file exists but decode fails: logs and DOES NOT overwrite current in-memory arrays.
-    private func loadFromDiskSafely() async {
-        await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .utility).async {
-                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                let url = docs.appendingPathComponent("prompts.json")
-
-                // Missing file is normal on first run
-                guard FileManager.default.fileExists(atPath: url.path) else {
-                    DispatchQueue.main.async {
-                        self.dailyItems        = []
-                        self.weeklyItems       = []
-                        self.workItems         = []
-                        self.monthlyItems      = []
-                        self.yearlyItems       = []
-                        self.eventsItems       = []
-                        self.studyItems        = []
-                        self.mentalHealthItems = []
-                        cont.resume()
-                    }
-                    return
-                }
-
-                do {
-                    let data = try Data(contentsOf: url)
-                    let dec = JSONDecoder()
-                    dec.dateDecodingStrategy = .iso8601
-                    let loaded = try dec.decode(PromptsState.self, from: data)
-
-                    DispatchQueue.main.async {
-                        self.dailyItems        = loaded.dailyItems
-                        self.weeklyItems       = loaded.weeklyItems
-                        self.workItems         = loaded.workItems
-                        self.monthlyItems      = loaded.monthlyItems
-                        self.yearlyItems       = loaded.yearlyItems
-                        self.eventsItems       = loaded.eventsItems
-                        self.studyItems        = loaded.studyItems
-                        self.mentalHealthItems = loaded.mentalHealthItems
-                        cont.resume()
-                    }
-
-                } catch {
-                    DispatchQueue.main.async {
-                        #if DEBUG
-                        print("❌ PromptsView loadFromDiskSafely failed: \(error)")
-                        print("   → Bundle: \(Bundle.main.bundleIdentifier ?? "nil")")
-                        print("   → File: \(url.path)")
-                        #endif
-                        // IMPORTANT: do NOT clobber current state with empty on decode failure
-                        cont.resume()
-                    }
-                }
-            }
-        }
-    }
-
     private func saveToDisk() {
         let state = PromptsState(
-            dailyItems:        dailyItems,
-            weeklyItems:       weeklyItems,
-            workItems:         workItems,
-            monthlyItems:      monthlyItems,
-            yearlyItems:       yearlyItems,
-            eventsItems:       eventsItems,
-            studyItems:        studyItems,
-            mentalHealthItems: mentalHealthItems
+            dailyLists:        dailyLists,
+            weeklyLists:       weeklyLists,
+            workLists:         workLists,
+            monthlyLists:      monthlyLists,
+            yearlyLists:       yearlyLists,
+            eventsLists:       eventsLists,
+            studyLists:        studyLists,
+            mentalHealthLists: mentalHealthLists
         )
-
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let url = docs.appendingPathComponent("prompts.json")
-
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.withoutEscapingSlashes]
-        enc.dateEncodingStrategy = .iso8601
-
-        do {
-            let data = try enc.encode(state)
-            try data.write(to: url, options: .atomic)
-
-            #if DEBUG
-            print("💾 PromptsView saved prompts.json (\(data.count) bytes)")
-            #endif
-        } catch {
-            #if DEBUG
-            print("❌ PromptsView saveToDisk failed: \(error)")
-            print("   → File: \(url.path)")
-            #endif
-        }
+        PromptsStore.save(state)
     }
 
     // MARK: - Helpers
-
-    private var draftTextTrimmed: String {
-        draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     private var placeholderText: String {
         switch selectedCategory {

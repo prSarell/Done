@@ -190,7 +190,7 @@ final class RandomPromptScheduler {
                 return false
             }
 
-            guard let rule = perPromptRules[prompt.text] else {
+            guard let rule = perPromptRules[prompt.id.uuidString] else {
                 return true // no rule -> stays in random pool
             }
 
@@ -225,7 +225,7 @@ final class RandomPromptScheduler {
                     let trimmed = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !trimmed.isEmpty else { return false }
 
-                    guard let rule = perPromptRules[prompt.text] else {
+                    guard let rule = perPromptRules[prompt.id.uuidString] else {
                         return true
                     }
 
@@ -283,7 +283,7 @@ final class RandomPromptScheduler {
         var rng = SeededRandom(seed: seed)
         var pool: [PromptItem] = []
         for prompt in candidates {
-            let weight = perPromptRules[prompt.text]?.isImportant == true ? rules.weightImportant : 1
+            let weight = perPromptRules[prompt.id.uuidString]?.isImportant == true ? rules.weightImportant : 1
             for _ in 0..<weight { pool.append(prompt) }
         }
         pool.shuffle(using: &rng)

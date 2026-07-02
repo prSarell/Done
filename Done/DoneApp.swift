@@ -84,144 +84,71 @@ struct DoneApp: App {
     }
 }
 
-// MARK: - Prompts load/save helpers (same schema PromptsView uses)
-
-private struct PromptsState: Codable {
-    var dailyItems:        [PromptItem] = []
-    var weeklyItems:       [PromptItem] = []
-    var workItems:         [PromptItem] = []   // ✅ IMPORTANT: you have Work in PromptsView
-    var monthlyItems:      [PromptItem] = []
-    var yearlyItems:       [PromptItem] = []
-    var eventsItems:       [PromptItem] = []
-    var studyItems:        [PromptItem] = []
-    var mentalHealthItems: [PromptItem] = []
-}
+// MARK: - Prompts load helpers (PromptsStore in Storage/PromptsStore.swift owns persistence)
 
 /// Returns UUIDs of Work-category prompts for time-gating in the random scheduler.
 private func loadWorkPromptIDsFromDisk() -> Set<UUID> {
-    guard let s = loadPromptsStateSafe() else { return [] }
-    return Set(s.workItems.map(\.id))
+    guard let s = PromptsStore.loadSafe() else { return [] }
+    return Set(s.workLists.allItems.map(\.id))
 }
 
 /// Returns all prompt items across all categories for scheduling.
 /// IMPORTANT: If prompts.json fails to load/decode, returns [] but does NOT write anything to disk.
 private func loadAllPromptsFromDisk() -> [PromptItem] {
-    guard let s = loadPromptsStateSafe() else {
+    guard let s = PromptsStore.loadSafe() else {
         #if DEBUG
         print("🛑 loadAllPromptsFromDisk: prompts.json failed to load; returning [] for scheduling only.")
         #endif
         return []
     }
-
-    return s.dailyItems
-         + s.weeklyItems
-         + s.workItems            // ✅ include work
-         + s.monthlyItems
-         + s.yearlyItems
-         + s.eventsItems
-         + s.studyItems
-         + s.mentalHealthItems
-}
-
-/// Safe loader:
-/// - If prompts.json does not exist, returns an empty PromptsState (first-run case).
-/// - If reading/decoding fails, returns nil (so callers can avoid overwriting prompts.json with empty state).
-private func loadPromptsStateSafe() -> PromptsState? {
-    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    let url = docs.appendingPathComponent("prompts.json")
-
-    // Missing file is normal on first run
-    guard FileManager.default.fileExists(atPath: url.path) else {
-        return PromptsState()
-    }
-
-    do {
-        let data = try Data(contentsOf: url)
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
-        return try dec.decode(PromptsState.self, from: data)
-    } catch {
-        #if DEBUG
-        print("❌ loadPromptsStateSafe failed: \(error)")
-        print("   → Bundle: \(Bundle.main.bundleIdentifier ?? "nil")")
-        print("   → File: \(url.path)")
-        #endif
-        return nil
-    }
-}
-
-/// Writes prompts.json atomically.
-private func savePromptsState(_ state: PromptsState) {
-    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    let url = docs.appendingPathComponent("prompts.json")
-
-    let enc = JSONEncoder()
-    enc.outputFormatting = [.withoutEscapingSlashes]
-    enc.dateEncodingStrategy = .iso8601
-
-    if let data = try? enc.encode(state) {
-        do {
-            try data.write(to: url, options: .atomic)
-            #if DEBUG
-            print("💾 savePromptsState: wrote prompts.json (\(data.count) bytes)")
-            print("   → Bundle: \(Bundle.main.bundleIdentifier ?? "nil")")
-            print("   → File: \(url.path)")
-            #endif
-        } catch {
-            #if DEBUG
-            print("❌ savePromptsState write error: \(error)")
-            print("   → File: \(url.path)")
-            #endif
-        }
-    } else {
-        #if DEBUG
-        print("❌ savePromptsState: failed to encode PromptsState")
-        #endif
-    }
+    return s.allItems
 }
 
 // MARK: - One-off cleanup (delete prompts whose dated rule has passed)
 
 private func performOneOffCleanup() {
-    var rules = PromptRulesStore.load()
-    guard !rules.isEmpty else { return }
-
-    let now = Date()
-    var toDeleteTexts: [String] = []
-
-    for (text, rule) in rules {
-        if rule.shouldAutoDelete(after: now) {
-            toDeleteTexts.append(text)
-        }
-    }
-
-    guard !toDeleteTexts.isEmpty else { return }
+    // Cheap early exit before touching prompts.json at all.
+    guard !PromptRulesStore.load().isEmpty else { return }
 
     // CRITICAL: only proceed if prompts.json loads successfully.
-    guard var state = loadPromptsStateSafe() else {
+    guard let state = PromptsStore.loadSafe() else {
         print("🛑 OneOffCleanup: aborted because prompts.json failed to load (preventing overwrite).")
         return
     }
 
-    let filter: ([PromptItem]) -> [PromptItem] = { arr in
-        arr.filter { !toDeleteTexts.contains($0.text) }
+    var rules = PromptRulesStore.loadMigratingIfNeeded(using: state.allItems)
+
+    let now = Date()
+    let toDeleteIDs = Set(rules.compactMap { key, rule -> UUID? in
+        guard rule.shouldAutoDelete(after: now), let id = UUID(uuidString: key) else { return nil }
+        return id
+    })
+    guard !toDeleteIDs.isEmpty else { return }
+
+    func filter(_ lists: [PromptList]) -> [PromptList] {
+        lists.map { list in
+            var list = list
+            list.items.removeAll { toDeleteIDs.contains($0.id) }
+            return list
+        }
     }
 
-    state.dailyItems        = filter(state.dailyItems)
-    state.weeklyItems       = filter(state.weeklyItems)
-    state.workItems         = filter(state.workItems)   // ✅ cleanup work too
-    state.monthlyItems      = filter(state.monthlyItems)
-    state.yearlyItems       = filter(state.yearlyItems)
-    state.eventsItems       = filter(state.eventsItems)
-    state.studyItems        = filter(state.studyItems)
-    state.mentalHealthItems = filter(state.mentalHealthItems)
+    var updatedState = state
+    updatedState.dailyLists        = filter(state.dailyLists)
+    updatedState.weeklyLists       = filter(state.weeklyLists)
+    updatedState.workLists         = filter(state.workLists)   // ✅ cleanup work too
+    updatedState.monthlyLists      = filter(state.monthlyLists)
+    updatedState.yearlyLists       = filter(state.yearlyLists)
+    updatedState.eventsLists       = filter(state.eventsLists)
+    updatedState.studyLists        = filter(state.studyLists)
+    updatedState.mentalHealthLists = filter(state.mentalHealthLists)
 
-    savePromptsState(state)
+    PromptsStore.save(updatedState)
 
-    toDeleteTexts.forEach { rules.removeValue(forKey: $0) }
+    toDeleteIDs.forEach { rules.removeValue(forKey: $0.uuidString) }
     PromptRulesStore.save(rules)
 
-    print("OneOffCleanup: removed \(toDeleteTexts.count) dated prompts: \(toDeleteTexts)")
+    print("OneOffCleanup: removed \(toDeleteIDs.count) dated prompts")
 }
 
 // MARK: - Daily summary helper

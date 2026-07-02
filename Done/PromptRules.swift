@@ -474,13 +474,42 @@ private extension PromptRule {
     }
 }
 
-// Simple persistence for rules keyed by prompt text (matches your existing usage)
+// Persistence for rules, keyed by prompt item id (as a UUID string).
+// Older data may still have entries keyed by prompt text; loadMigratingIfNeeded(using:)
+// copies those over to id-based keys the first time it runs.
 public enum PromptRulesStore {
     private static let filename = "prompt_rules.json"
+    private static let migratedDefaultsKey = "PromptRulesStore.migratedToIDKeys"
 
     private static var fileURL: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent(filename)
+    }
+
+    private static var backupURL: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent(filename + ".bak")
+    }
+
+    /// Loads rules and, once per install, migrates any legacy text-keyed entries to
+    /// id-based keys for every item in `allItems`. Copies rather than moves the legacy
+    /// entry, since one legacy text could map to several ids (e.g. same wording reused
+    /// across different sub-lists) and leaving the old key behind is harmless.
+    static func loadMigratingIfNeeded(using allItems: [PromptItem]) -> [String: PromptRule] {
+        var rules = load()
+        guard !UserDefaults.standard.bool(forKey: migratedDefaultsKey) else { return rules }
+
+        var changed = false
+        for item in allItems {
+            let idKey = item.id.uuidString
+            if rules[idKey] == nil, let legacy = rules[item.text] {
+                rules[idKey] = legacy
+                changed = true
+            }
+        }
+        UserDefaults.standard.set(true, forKey: migratedDefaultsKey)
+        if changed { save(rules) }
+        return rules
     }
 
     public static func load() -> [String: PromptRule] {
@@ -517,6 +546,8 @@ public enum PromptRulesStore {
 
     public static func save(_ rules: [String: PromptRule]) {
         do {
+            makeBackupIfNeeded()
+
             let enc = JSONEncoder()
             enc.outputFormatting = [.withoutEscapingSlashes]
             enc.dateEncodingStrategy = .iso8601
@@ -533,6 +564,21 @@ public enum PromptRulesStore {
             #if DEBUG
             print("❌ PromptRulesStore save error: \(error)")
             print("   → File: \(fileURL.path)")
+            #endif
+        }
+    }
+
+    private static func makeBackupIfNeeded() {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: fileURL.path) else { return }
+        do {
+            if fm.fileExists(atPath: backupURL.path) {
+                try fm.removeItem(at: backupURL)
+            }
+            try fm.copyItem(at: fileURL, to: backupURL)
+        } catch {
+            #if DEBUG
+            print("⚠️ PromptRulesStore: backup failed: \(error)")
             #endif
         }
     }
