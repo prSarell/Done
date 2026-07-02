@@ -57,6 +57,10 @@ final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelega
             PromptActionEvent(promptID: promptID, promptText: promptText, action: action)
         )
 
+        if action == .done {
+            NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
+        }
+
         #if DEBUG
         print("✅ Recorded prompt action:", action.rawValue, "|", promptText)
         #endif

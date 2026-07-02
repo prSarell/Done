@@ -123,7 +123,7 @@ final class NotificationsManager {
     }
 
     func scheduleDailySummary(doneCount: Int) {
-        let id = "daily-summary-\(Self.todayKey())"
+        let id = "daily-summary-\(Self.dateKey(for: Date()))"
         cancel(id: id)
 
         var comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
@@ -136,10 +136,43 @@ final class NotificationsManager {
         scheduleOneOff(id: id, title: "\(doneCount) \(noun) Done today!", at: fireDate)
     }
 
-    private static func todayKey() -> String {
+    /// Tasks completed after the 9pm summary has already fired go unmentioned that day.
+    /// Call this whenever a prompt is marked done; if it's currently at/after 9pm, this
+    /// (re)schedules a follow-up notification for 8am the next morning summarizing how many
+    /// extra tasks got done overnight. Safe to call repeatedly — each call replaces the
+    /// previous morning notification for today with an up-to-date count.
+    func scheduleMorningUpdateIfNeeded(referenceDate: Date = Date(), calendar: Calendar = .current) {
+        guard let dayStart = calendar.date(
+            from: calendar.dateComponents([.year, .month, .day], from: referenceDate)
+        ) else { return }
+        guard let cutoff = calendar.date(bySettingHour: 21, minute: 0, second: 0, of: dayStart) else { return }
+        guard referenceDate >= cutoff else { return }
+
+        let events = PromptStatusStore.load()
+        let todayDoneEvents = events.filter {
+            $0.action == .done && calendar.isDate($0.occurredAt, inSameDayAs: referenceDate)
+        }
+        let bonusCount = todayDoneEvents.filter { $0.occurredAt >= cutoff }.count
+        guard bonusCount > 0 else { return }
+        let totalCount = todayDoneEvents.count
+
+        guard let tomorrowStart = calendar.date(byAdding: .day, value: 1, to: dayStart),
+              let fireDate = calendar.date(bySettingHour: 8, minute: 0, second: 0, of: tomorrowStart)
+        else { return }
+
+        let id = "morning-update-\(Self.dateKey(for: referenceDate))"
+        cancel(id: id)
+
+        let bonusNoun = bonusCount == 1 ? "task" : "tasks"
+        let totalNoun = totalCount == 1 ? "task" : "tasks"
+        let title = "\(bonusCount) more \(bonusNoun) done after 9pm — \(totalCount) \(totalNoun) done yesterday!"
+        scheduleOneOff(id: id, title: title, at: fireDate)
+    }
+
+    private static func dateKey(for date: Date) -> String {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd"
-        return df.string(from: Date())
+        return df.string(from: date)
     }
 
     func cancel(id: String) {

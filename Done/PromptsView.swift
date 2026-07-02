@@ -520,6 +520,7 @@ struct PromptsView: View {
         // Done removes the prompt unless it is a repeating schedule (those come back by design)
         if action == .done {
             doneTodayPromptIDs.insert(item.id)
+            NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
             let rule = rules[item.id.uuidString]
             if rule?.oneOff != false {
                 switch rule?.recurrenceKind {
