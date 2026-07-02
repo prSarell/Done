@@ -60,6 +60,7 @@ private struct PromptRow: View {
     let item: PromptItem
     let alertLabel: String
     let isImportant: Bool
+    let isDoneToday: Bool
     let onAlertTap: () -> Void
     let onDone: () -> Void
     let onSkip: () -> Void
@@ -69,11 +70,13 @@ private struct PromptRow: View {
         HStack {
             if isImportant {
                 Image(systemName: "star.fill")
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(isDoneToday ? Color.secondary : Color.yellow)
                     .font(.caption)
             }
             Text(item.text)
                 .lineLimit(2)
+                .strikethrough(isDoneToday)
+                .foregroundStyle(isDoneToday ? .secondary : .primary)
             Spacer()
 
             Button(action: onAlertTap) {
@@ -83,11 +86,12 @@ private struct PromptRow: View {
                     .padding(.vertical, 4)
                     .background(
                         Capsule()
-                            .stroke(Color.accentColor, lineWidth: 1)
+                            .stroke(isDoneToday ? Color.secondary : Color.accentColor, lineWidth: 1)
                     )
             }
             .buttonStyle(.plain)
         }
+        .opacity(isDoneToday ? 0.5 : 1)
         .contextMenu {
             Button { onDone() } label: {
                 Label("Mark Done", systemImage: "checkmark.circle.fill")
@@ -141,6 +145,9 @@ struct PromptsView: View {
 
     private enum AlertRecurrence { case yearly, fortnightly, monthly }
     @State private var alertRecurrence: AlertRecurrence = .yearly
+
+    // Prompt IDs marked done today — greyed out until the day rolls over
+    @State private var doneTodayPromptIDs: Set<UUID> = []
 
     // MARK: - Safety gates / debouncers
 
@@ -206,6 +213,7 @@ struct PromptsView: View {
             hasFinishedInitialLoad = true
 
             purgeCompletedOneOffPrompts()
+            refreshDoneTodaySet()
 
             // Plan once based on loaded data (NOT repeatedly during load)
             RandomPromptScheduler.shared.refreshScheduleToday(
@@ -235,6 +243,7 @@ struct PromptsView: View {
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .active, hasFinishedInitialLoad else { return }
             purgeCompletedOneOffPrompts()
+            refreshDoneTodaySet()
         }
 
         // Unified Alert editor sheet
@@ -370,6 +379,7 @@ struct PromptsView: View {
                         item: item,
                         alertLabel: alertLabel(for: item),
                         isImportant: rules[item.text]?.isImportant == true,
+                        isDoneToday: doneTodayPromptIDs.contains(item.id),
                         onAlertTap: { startEditingAlert(for: item) },
                         onDone: { markPrompt(item, action: .done) },
                         onSkip: { markPrompt(item, action: .skipped) },
@@ -412,6 +422,7 @@ struct PromptsView: View {
 
         // Done removes the prompt unless it is a repeating schedule (those come back by design)
         if action == .done {
+            doneTodayPromptIDs.insert(item.id)
             let rule = rules[item.text]
             if rule?.oneOff != false {
                 switch rule?.recurrenceKind {
@@ -862,6 +873,17 @@ struct PromptsView: View {
         for text in removedTexts {
             rules[text] = nil
         }
+    }
+
+    /// Recomputes which prompts were marked done today, so their rows can be greyed out.
+    /// Prompts marked done on a prior day fall out of this set automatically, making them
+    /// markable again.
+    private func refreshDoneTodaySet() {
+        doneTodayPromptIDs = Set(
+            PromptStatusStore.load()
+                .filter { $0.action == .done && Calendar.current.isDateInToday($0.occurredAt) }
+                .map { $0.promptID }
+        )
     }
 
     // MARK: - Persistence
