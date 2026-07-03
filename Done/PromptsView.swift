@@ -32,7 +32,7 @@ private struct CategoryTabButton: View {
 }
 
 // Single row for a prompt, with a unified Alert pill
-private struct PromptRow: View {
+struct PromptRow: View {
     let item: PromptItem
     let alertLabel: String
     let isImportant: Bool
@@ -40,7 +40,9 @@ private struct PromptRow: View {
     let onAlertTap: () -> Void
     let onDone: () -> Void
     let onSkip: () -> Void
-    let onToggleImportant: () -> Void
+    // nil hides the Mark/Remove Important context menu entry — used on the Stats page,
+    // where every row shown is already important by definition.
+    var onToggleImportant: (() -> Void)? = nil
 
     var body: some View {
         HStack {
@@ -75,11 +77,13 @@ private struct PromptRow: View {
             Button { onSkip() } label: {
                 Label("Skip", systemImage: "forward.circle.fill")
             }
-            Button { onToggleImportant() } label: {
-                Label(
-                    isImportant ? "Remove Important" : "Mark Important",
-                    systemImage: isImportant ? "star.slash" : "star"
-                )
+            if let onToggleImportant {
+                Button { onToggleImportant() } label: {
+                    Label(
+                        isImportant ? "Remove Important" : "Mark Important",
+                        systemImage: isImportant ? "star.slash" : "star"
+                    )
+                }
             }
         }
     }
@@ -115,6 +119,8 @@ private struct AddItemRow: View {
 }
 
 struct PromptsView: View {
+    @EnvironmentObject private var rewardsVM: RewardsViewModel
+
     @State private var selectedCategory: PromptCategory = .daily
 
     // Separate lists (each holding one or more named sub-lists) per category
@@ -130,26 +136,15 @@ struct PromptsView: View {
     // Rules (keyed by prompt item id, as a UUID string)
     @State private var rules: [String: PromptRule] = [:]
 
-    // Unified alert editor state
-    @State private var editingAlertRuleKey: String?
-    @State private var showingAlertSheet = false
-
-    @State private var alertDayEnabled: Bool = false
-    @State private var alertDateEnabled: Bool = false
-    @State private var alertTimeEnabled: Bool = false
-
-    @State private var alertWeekday: Int = 2   // 1 = Sunday … 7 = Saturday, default Monday
-    @State private var alertDate: Date = Date()
-    @State private var alertTime: Date = Date().addingTimeInterval(3600)
-
-    // false = Once, true = Repeat
-    @State private var alertRepeats: Bool = true
-
-    private enum AlertRecurrence { case yearly, fortnightly, monthly }
-    @State private var alertRecurrence: AlertRecurrence = .yearly
+    // Unified alert editor (shared with StatsView)
+    @StateObject private var alertEditor = PromptAlertEditorModel()
 
     // Prompt IDs marked done today — greyed out until the day rolls over
     @State private var doneTodayPromptIDs: Set<UUID> = []
+
+    // Reward overlay shown when an important prompt is marked done
+    @State private var rewardMessage: String? = nil
+    @State private var rewardColor: Color = .blue
 
     // Sub-list rename / delete state
     @State private var renamingListID: UUID?
@@ -216,8 +211,28 @@ struct PromptsView: View {
     // MARK: - Body split into small pieces
 
     var body: some View {
-        NavigationStack {
-            content
+        ZStack {
+            NavigationStack {
+                content
+            }
+
+            if let message = rewardMessage {
+                RewardOverlay(message: message, color: rewardColor) {
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        rewardMessage = nil
+                    }
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            }
+        }
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: rewardMessage != nil)
+    }
+
+    private func triggerReward() {
+        guard let msg = rewardsVM.triggerRandomReward() else { return }
+        rewardColor = RewardOverlay.colors.randomElement() ?? .blue
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+            rewardMessage = msg
         }
     }
 
@@ -304,8 +319,8 @@ struct PromptsView: View {
         }
 
         // Unified Alert editor sheet
-        .sheet(isPresented: $showingAlertSheet) {
-            alertEditorSheet()
+        .sheet(isPresented: $alertEditor.isPresented) {
+            PromptAlertEditorSheet(editor: alertEditor)
         }
     }
 
@@ -402,10 +417,14 @@ struct PromptsView: View {
                 ForEach(list.wrappedValue.items, id: \.id) { item in
                     PromptRow(
                         item: item,
-                        alertLabel: alertLabel(for: item),
+                        alertLabel: PromptAlertEditorModel.label(for: rules[item.id.uuidString]),
                         isImportant: rules[item.id.uuidString]?.isImportant == true,
                         isDoneToday: doneTodayPromptIDs.contains(item.id),
-                        onAlertTap: { startEditingAlert(for: item) },
+                        onAlertTap: {
+                            alertEditor.begin(rule: rules[item.id.uuidString]) { newRule in
+                                rules[item.id.uuidString] = newRule
+                            }
+                        },
                         onDone: { markPrompt(item, action: .done) },
                         onSkip: { markPrompt(item, action: .skipped) },
                         onToggleImportant: { toggleImportant(item) }
@@ -522,6 +541,9 @@ struct PromptsView: View {
             doneTodayPromptIDs.insert(item.id)
             NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
             let rule = rules[item.id.uuidString]
+            if rule?.isImportant == true {
+                triggerReward()
+            }
             if rule?.oneOff != false {
                 switch rule?.recurrenceKind {
                 case nil, .none?, .oneOff:
@@ -569,311 +591,6 @@ struct PromptsView: View {
         let removedIDs = indexSet.map { binding.wrappedValue[idx].items[$0].id }
         binding.wrappedValue[idx].items.remove(atOffsets: indexSet)
         removedIDs.forEach { rules[$0.uuidString] = nil }
-    }
-
-    // MARK: - Unified Alert helpers
-    // (UNCHANGED apart from keying by item id instead of text)
-
-    private func startEditingAlert(for item: PromptItem) {
-        let key = item.id.uuidString
-        editingAlertRuleKey = key
-
-        let now = Date()
-        let cal = Calendar.current
-        let rule = rules[key]
-
-        // Reset defaults
-        alertDayEnabled = false
-        alertDateEnabled = false
-        alertTimeEnabled = false
-
-        alertWeekday = cal.component(.weekday, from: now)
-        alertDate = now
-        alertTime = now.addingTimeInterval(3600)
-        alertRepeats = true
-        alertRecurrence = .yearly
-
-        if let rule {
-            if let wd = rule.weekday {
-                alertDayEnabled = true
-                alertWeekday = wd
-            }
-
-            if let d = rule.date {
-                alertDateEnabled = true
-                alertDate = d
-            }
-
-            if let h = rule.timeHour, let m = rule.timeMinute {
-                if let composed = cal.date(bySettingHour: h, minute: m, second: 0, of: now) {
-                    alertTimeEnabled = true
-                    alertTime = composed
-                } else {
-                    alertTimeEnabled = true
-                }
-            }
-
-            if let oneOff = rule.oneOff {
-                alertRepeats = !oneOff
-            } else {
-                // Legacy rule with no explicit oneOff — infer from recurrence structure
-                switch rule.recurrenceKind {
-                case .oneOff:
-                    alertRepeats = false
-                default:
-                    alertRepeats = true
-                }
-            }
-
-            if rule.monthlyDay != nil || (rule.monthlyIsLastDay ?? false) {
-                alertRecurrence = .monthly
-                alertRepeats = true
-            } else if rule.fortnightlyAnchorDate != nil {
-                alertRecurrence = .fortnightly
-                alertRepeats = true
-            } else {
-                alertRecurrence = .yearly
-            }
-        }
-
-        DispatchQueue.main.async {
-            self.showingAlertSheet = true
-        }
-    }
-
-    private func alertLabel(for item: PromptItem) -> String {
-        let key = item.id.uuidString
-        guard let rule = rules[key] else { return "Alert" }
-
-        let hasDay = (rule.weekday != nil)
-        let hasDate = (rule.date != nil)
-        let hasTime = (rule.timeHour != nil && rule.timeMinute != nil)
-
-        if !hasDay && !hasDate && !hasTime { return "Alert" }
-
-        let cal = Calendar.current
-        let dfDate = DateFormatter()
-        dfDate.dateStyle = .medium
-        dfDate.timeStyle = .none
-
-        let dfTime = DateFormatter()
-        dfTime.dateStyle = .none
-        dfTime.timeStyle = .short
-
-        if let date = rule.date {
-            var dateToShow = date
-            if hasTime,
-               let h = rule.timeHour,
-               let m = rule.timeMinute,
-               let composed = cal.date(bySettingHour: h, minute: m, second: 0, of: date) {
-                dateToShow = composed
-            }
-
-            if hasTime {
-                let dateStr = dfDate.string(from: dateToShow)
-                let timeStr = dfTime.string(from: dateToShow)
-                return "\(dateStr) \(timeStr)"
-            } else {
-                return dfDate.string(from: dateToShow)
-            }
-        }
-
-        if let wd = rule.weekday {
-            let dayName = weekdayName(for: wd)
-
-            if hasTime {
-                let now = Date()
-                if let h = rule.timeHour,
-                   let m = rule.timeMinute,
-                   let t = cal.date(bySettingHour: h, minute: m, second: 0, of: now) {
-                    let timeStr = dfTime.string(from: t)
-                    return "\(dayName) \(timeStr)"
-                } else {
-                    return dayName
-                }
-            } else {
-                return dayName
-            }
-        }
-
-        if hasTime,
-           let h = rule.timeHour,
-           let m = rule.timeMinute {
-            let now = Date()
-            if let t = cal.date(bySettingHour: h, minute: m, second: 0, of: now) {
-                return dfTime.string(from: t)
-            } else {
-                return "Time set"
-            }
-        }
-
-        return "Alert"
-    }
-
-    private func weekdayName(for weekday: Int) -> String {
-        let symbols = Calendar.current.shortWeekdaySymbols
-        guard weekday >= 1, weekday <= symbols.count else { return "Day" }
-        return symbols[weekday - 1]
-    }
-
-    @ViewBuilder
-    private func alertEditorSheet() -> some View {
-        NavigationStack {
-            Form {
-                Section("Day / Date / Time") {
-                    Toggle("Day (weekday)", isOn: $alertDayEnabled)
-
-                    if alertDayEnabled {
-                        Picker("Weekday", selection: $alertWeekday) {
-                            ForEach(1...7, id: \.self) { wd in
-                                Text(weekdayName(for: wd)).tag(wd)
-                            }
-                        }
-                        .pickerStyle(.wheel)
-                        .frame(maxHeight: 150)
-                    }
-
-                    Toggle("Date", isOn: $alertDateEnabled)
-
-                    if alertDateEnabled {
-                        DatePicker("Date", selection: $alertDate, displayedComponents: [.date])
-                            .datePickerStyle(.wheel)
-                            .labelsHidden()
-                            .frame(maxHeight: 180)
-                    }
-
-                    Toggle("Time", isOn: $alertTimeEnabled)
-
-                    if alertTimeEnabled {
-                        DatePicker("Time", selection: $alertTime, displayedComponents: [.hourAndMinute])
-                            .datePickerStyle(.wheel)
-                            .labelsHidden()
-                            .frame(maxHeight: 180)
-                    }
-                }
-
-                Section("Repeat") {
-                    Picker("Repeat", selection: $alertRepeats) {
-                        Text("Once").tag(false)
-                        Text("Repeat").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-
-                    if alertDateEnabled && alertRepeats {
-                        Picker("Recurrence", selection: $alertRecurrence) {
-                            Text("Yearly").tag(AlertRecurrence.yearly)
-                            Text("Fortnightly").tag(AlertRecurrence.fortnightly)
-                            Text("Monthly").tag(AlertRecurrence.monthly)
-                        }
-                        .pickerStyle(.segmented)
-                    }
-                }
-
-                Section {
-                    Text("You can turn on any combination of Day, Date, and Time.\n\nIf both Day and Date are on, the Date wins for scheduling. \"Yearly\" repeats on the same date each year. \"Fortnightly\" repeats every 14 days from the selected date. \"Monthly\" repeats on the same day of each month.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle("Alert")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { showingAlertSheet = false }
-                }
-                ToolbarItem(placement: .destructiveAction) {
-                    if let key = editingAlertRuleKey, rules[key] != nil {
-                        Button("Clear") {
-                            if let key = editingAlertRuleKey { rules[key] = nil }
-                            showingAlertSheet = false
-                        }
-                    }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { saveAlertEdits() }
-                }
-            }
-        }
-    }
-
-    private func saveAlertEdits() {
-        guard let key = editingAlertRuleKey else {
-            showingAlertSheet = false
-            return
-        }
-
-        if !alertDayEnabled && !alertDateEnabled && !alertTimeEnabled {
-            rules[key] = nil
-            showingAlertSheet = false
-            return
-        }
-
-        var rule = rules[key] ?? PromptRule()
-        let cal = Calendar.current
-
-        if alertDayEnabled { rule.weekday = alertWeekday } else { rule.weekday = nil }
-
-        if alertDateEnabled {
-            let comps = cal.dateComponents([.year, .month, .day], from: alertDate)
-            rule.date = cal.date(from: comps)
-        } else {
-            rule.date = nil
-        }
-
-        if alertTimeEnabled {
-            let comps = cal.dateComponents([.hour, .minute], from: alertTime)
-            rule.timeHour = comps.hour
-            rule.timeMinute = comps.minute
-        } else {
-            rule.timeHour = nil
-            rule.timeMinute = nil
-        }
-
-        rule.oneOff = !alertRepeats
-
-        if alertDateEnabled && alertRepeats {
-            switch alertRecurrence {
-            case .monthly:
-                let comps = cal.dateComponents([.day], from: alertDate)
-                if let d = comps.day {
-                    if let range = cal.range(of: .day, in: .month, for: alertDate),
-                       d == range.count {
-                        rule.monthlyIsLastDay = true
-                        rule.monthlyDay = nil
-                    } else {
-                        rule.monthlyDay = d
-                        rule.monthlyIsLastDay = false
-                    }
-                }
-                rule.month = nil
-                rule.day = nil
-                rule.fortnightlyAnchorDate = nil
-
-            case .fortnightly:
-                rule.fortnightlyAnchorDate = alertDate
-                rule.monthlyDay = nil
-                rule.monthlyIsLastDay = nil
-                rule.month = nil
-                rule.day = nil
-
-            case .yearly:
-                let comps = cal.dateComponents([.month, .day], from: alertDate)
-                rule.month = comps.month
-                rule.day = comps.day
-                rule.monthlyDay = nil
-                rule.monthlyIsLastDay = nil
-                rule.fortnightlyAnchorDate = nil
-            }
-        } else {
-            rule.month = nil
-            rule.day = nil
-            rule.monthlyDay = nil
-            rule.monthlyIsLastDay = nil
-            rule.fortnightlyAnchorDate = nil
-        }
-
-        rules[key] = rule
-        showingAlertSheet = false
     }
 
     // MARK: - Done cleanup

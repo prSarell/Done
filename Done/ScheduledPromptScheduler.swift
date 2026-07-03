@@ -171,10 +171,11 @@ final class ScheduledPromptScheduler {
                         PromptNotificationDelegate.kPromptText: prompt.text
                     ]
 
+                    let title = rule.isImportant == true ? "⭐️ \(prompt.text)" : prompt.text
                     allRequests.append(
                         PendingScheduledNotification(
                             id: id,
-                            title: prompt.text,
+                            title: title,
                             subtitle: subtitle,
                             fireDate: fireDate,
                             userInfo: userInfo

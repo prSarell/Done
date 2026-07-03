@@ -1,5 +1,6 @@
 import SwiftUI
 import Charts
+import UserNotifications
 
 struct StatsView: View {
     enum Period: String, CaseIterable {
@@ -10,33 +11,68 @@ struct StatsView: View {
     }
 
     @EnvironmentObject private var notesVM: TimerNotesViewModel
+    @EnvironmentObject private var rewardsVM: RewardsViewModel
+    @StateObject private var alertEditor = PromptAlertEditorModel()
+
     @State private var period: Period = .week
     @State private var events: [PromptActionEvent] = []
     @State private var focusExpanded = false
     @State private var timerFocusExpanded = false
     @State private var importantGeneral: [PromptItem] = []
     @State private var importantWork: [PromptItem] = []
+    @State private var rules: [String: PromptRule] = [:]
+    @State private var doneTodayPromptIDs: Set<UUID> = []
+
+    @State private var rewardMessage: String? = nil
+    @State private var rewardColor: Color = .blue
 
     var body: some View {
-        NavigationStack {
-            List {
-                pickerSection
-                summarySection
-                chartSection
-                focusSection
-                timerSummarySection
-                timerChartSection
-                timerFocusSection
-                importantGeneralSection
-                importantWorkSection
+        ZStack {
+            NavigationStack {
+                List {
+                    pickerSection
+                    summarySection
+                    chartSection
+                    focusSection
+                    timerSummarySection
+                    timerChartSection
+                    timerFocusSection
+                    importantGeneralSection
+                    importantWorkSection
+                }
+                .navigationTitle("Stats")
+                .task {
+                    events = PromptStatusStore.load()
+                    loadImportantPrompts()
+                    refreshDoneTodaySet()
+                }
+                .onAppear {
+                    loadImportantPrompts()
+                    refreshDoneTodaySet()
+                }
+                .onChange(of: period) { focusExpanded = false; timerFocusExpanded = false }
+                .sheet(isPresented: $alertEditor.isPresented) {
+                    PromptAlertEditorSheet(editor: alertEditor)
+                }
             }
-            .navigationTitle("Stats")
-            .task {
-                events = PromptStatusStore.load()
-                loadImportantPrompts()
+
+            if let message = rewardMessage {
+                RewardOverlay(message: message, color: rewardColor) {
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        rewardMessage = nil
+                    }
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
-            .onAppear { loadImportantPrompts() }
-            .onChange(of: period) { focusExpanded = false; timerFocusExpanded = false }
+        }
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: rewardMessage != nil)
+    }
+
+    private func triggerReward() {
+        guard let msg = rewardsVM.triggerRandomReward() else { return }
+        rewardColor = RewardOverlay.colors.randomElement() ?? .blue
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+            rewardMessage = msg
         }
     }
 
@@ -249,9 +285,7 @@ struct StatsView: View {
         if !importantGeneral.isEmpty {
             Section("Important General") {
                 ForEach(importantGeneral) { item in
-                    Label(item.text, systemImage: "star.fill")
-                        .foregroundStyle(.primary)
-                        .symbolRenderingMode(.multicolor)
+                    importantPromptRow(item)
                 }
             }
         }
@@ -262,27 +296,136 @@ struct StatsView: View {
         if !importantWork.isEmpty {
             Section("Important Work") {
                 ForEach(importantWork) { item in
-                    Label(item.text, systemImage: "star.fill")
-                        .foregroundStyle(.primary)
-                        .symbolRenderingMode(.multicolor)
+                    importantPromptRow(item)
                 }
             }
         }
     }
 
+    /// Same row + Alert/Done/Skip functionality as the Prompts screen, minus the
+    /// Mark/Remove Important toggle — every prompt shown here is already important.
+    @ViewBuilder
+    private func importantPromptRow(_ item: PromptItem) -> some View {
+        PromptRow(
+            item: item,
+            alertLabel: PromptAlertEditorModel.label(for: rules[item.id.uuidString]),
+            isImportant: true,
+            isDoneToday: doneTodayPromptIDs.contains(item.id),
+            onAlertTap: {
+                alertEditor.begin(rule: rules[item.id.uuidString]) { newRule in
+                    persistRuleChange(for: item, newRule: newRule)
+                }
+            },
+            onDone: { markImportantPrompt(item, action: .done) },
+            onSkip: { markImportantPrompt(item, action: .skipped) }
+        )
+    }
+
+    /// Marks an important prompt done/skipped directly from the Stats page, mirroring
+    /// `PromptsView.markPrompt(_:action:)` since Stats only holds a read-only snapshot
+    /// of the prompt lists rather than the live `@State` arrays PromptsView mutates.
+    private func markImportantPrompt(_ item: PromptItem, action: PromptAction) {
+        PromptStatusStore.append(
+            PromptActionEvent(promptID: item.id, promptText: item.text, action: action)
+        )
+        events = PromptStatusStore.load()
+
+        Task {
+            let center = UNUserNotificationCenter.current()
+            async let pendingAsync = center.pendingNotificationRequests()
+            async let deliveredAsync = center.deliveredNotifications()
+            let (pending, delivered) = await (pendingAsync, deliveredAsync)
+            let toCancel = pending
+                .filter { $0.identifier.contains(item.id.uuidString) }
+                .map { $0.identifier }
+            let toRemove = delivered
+                .filter { $0.request.identifier.contains(item.id.uuidString) }
+                .map { $0.request.identifier }
+            if !toCancel.isEmpty {
+                center.removePendingNotificationRequests(withIdentifiers: toCancel)
+            }
+            if !toRemove.isEmpty {
+                center.removeDeliveredNotifications(withIdentifiers: toRemove)
+            }
+        }
+
+        guard action == .done else { return }
+
+        doneTodayPromptIDs.insert(item.id)
+        NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
+        triggerReward()   // everything in this list is important by definition
+
+        guard var state = PromptsStore.loadSafe() else { return }
+        var rules = PromptRulesStore.loadMigratingIfNeeded(using: state.allItems)
+
+        let rule = rules[item.id.uuidString]
+        let shouldRemove: Bool
+        if rule?.oneOff == false {
+            shouldRemove = false
+        } else {
+            switch rule?.recurrenceKind {
+            case nil, .none?, .oneOff: shouldRemove = true
+            default:                   shouldRemove = false
+            }
+        }
+
+        if shouldRemove {
+            for keyPath in Self.promptListKeyPaths {
+                for idx in state[keyPath: keyPath].indices {
+                    state[keyPath: keyPath][idx].items.removeAll { $0.id == item.id }
+                }
+            }
+            rules[item.id.uuidString] = nil
+            PromptsStore.save(state)
+            PromptRulesStore.save(rules)
+        }
+
+        RandomPromptScheduler.shared.refreshScheduleToday(
+            allPrompts: state.allItems,
+            workPromptIDs: Set(state.workLists.allItems.map(\.id)),
+            forceRebuild: true
+        )
+
+        loadImportantPrompts()
+    }
+
+    /// Persists an alert-rule edit made from the Stats page's Alert sheet. Stats doesn't
+    /// keep a live `@State` rules dict wired to autosave like PromptsView does, so this
+    /// reads the freshest rules from disk, applies the change, and saves directly.
+    private func persistRuleChange(for item: PromptItem, newRule: PromptRule?) {
+        var latestRules = PromptRulesStore.load()
+        latestRules[item.id.uuidString] = newRule
+        PromptRulesStore.save(latestRules)
+        loadImportantPrompts()
+    }
+
+    private static let promptListKeyPaths: [WritableKeyPath<PromptsState, [PromptList]>] = [
+        \.dailyLists, \.weeklyLists, \.workLists, \.monthlyLists,
+        \.yearlyLists, \.eventsLists, \.studyLists, \.mentalHealthLists
+    ]
+
+    private func refreshDoneTodaySet() {
+        doneTodayPromptIDs = Set(
+            PromptStatusStore.load()
+                .filter { $0.action == .done && Calendar.current.isDateInToday($0.occurredAt) }
+                .map { $0.promptID }
+        )
+    }
+
     private func loadImportantPrompts() {
         guard let state = PromptsStore.loadSafe() else { return }
-        let rules = PromptRulesStore.loadMigratingIfNeeded(using: state.allItems)
+        let loadedRules = PromptRulesStore.loadMigratingIfNeeded(using: state.allItems)
+        rules = loadedRules
 
         let nonWork = state.dailyLists.allItems + state.weeklyLists.allItems + state.monthlyLists.allItems
             + state.yearlyLists.allItems + state.eventsLists.allItems + state.studyLists.allItems
             + state.mentalHealthLists.allItems
 
         importantGeneral = nonWork
-            .filter { rules[$0.id.uuidString]?.isImportant == true }
+            .filter { loadedRules[$0.id.uuidString]?.isImportant == true }
 
         importantWork = state.workLists.allItems
-            .filter { rules[$0.id.uuidString]?.isImportant == true }
+            .filter { loadedRules[$0.id.uuidString]?.isImportant == true }
     }
 
     private var topTimerFocus: [(text: String, totalSeconds: Int)] {

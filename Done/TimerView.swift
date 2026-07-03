@@ -26,10 +26,6 @@ struct TimerView: View {
     @State private var rewardMessage: String? = nil
     @State private var rewardColor: Color = .blue
 
-    private static let rewardColors: [Color] = [
-        .blue, .purple, .orange, .green, .teal, .indigo, .mint, .cyan, .pink
-    ]
-
     private var isOverTarget: Bool {
         targetSeconds > 0 && elapsedSeconds >= targetSeconds
     }
@@ -188,7 +184,7 @@ struct TimerView: View {
 
         if shouldReward {
             let msg = rewardsVM.triggerRandomReward()
-            rewardColor = Self.rewardColors.randomElement() ?? .blue
+            rewardColor = RewardOverlay.colors.randomElement() ?? .blue
             pendingSheet = true
             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                 rewardMessage = msg
@@ -231,7 +227,13 @@ struct TimerView: View {
 
 // MARK: - Reward overlay
 
-private struct RewardOverlay: View {
+// Shared across TimerView, PromptsView, and StatsView — any in-app "completion" moment
+// that should show a celebratory overlay uses this same component.
+struct RewardOverlay: View {
+    static let colors: [Color] = [
+        .blue, .purple, .orange, .green, .teal, .indigo, .mint, .cyan, .pink
+    ]
+
     let message: String
     let color: Color
     let dismiss: () -> Void
