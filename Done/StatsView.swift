@@ -15,6 +15,7 @@ struct StatsView: View {
     @StateObject private var alertEditor = PromptAlertEditorModel()
 
     @State private var period: Period = .week
+    @State private var referenceDate: Date = Date()
     @State private var events: [PromptActionEvent] = []
     @State private var focusExpanded = false
     @State private var timerFocusExpanded = false
@@ -32,6 +33,7 @@ struct StatsView: View {
             NavigationStack {
                 List {
                     pickerSection
+                    periodNavigatorSection
                     summarySection
                     chartSection
                     focusSection
@@ -51,7 +53,19 @@ struct StatsView: View {
                     loadImportantPrompts()
                     refreshDoneTodaySet()
                 }
-                .onChange(of: period) { focusExpanded = false; timerFocusExpanded = false }
+                .onChange(of: period) {
+                    referenceDate = Date()
+                    focusExpanded = false
+                    timerFocusExpanded = false
+                }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 24)
+                        .onEnded { value in
+                            guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                            // Swipe right -> go back to the previous period (older); swipe left -> forward.
+                            shiftPeriod(by: value.translation.width > 0 ? -1 : 1)
+                        }
+                )
                 .sheet(isPresented: $alertEditor.isPresented) {
                     PromptAlertEditorSheet(editor: alertEditor)
                 }
@@ -90,6 +104,42 @@ struct StatsView: View {
         .listRowInsets(.init())
     }
 
+    private var periodNavigatorSection: some View {
+        Section {
+            HStack {
+                Button {
+                    shiftPeriod(by: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Text(periodLabel)
+                    .font(.subheadline.weight(.semibold))
+                    .contentTransition(.numericText())
+                    .animation(.easeInOut(duration: 0.15), value: periodLabel)
+
+                Spacer()
+
+                Button {
+                    shiftPeriod(by: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .opacity(isAtCurrentPeriod ? 0.3 : 1)
+                .disabled(isAtCurrentPeriod)
+            }
+        }
+        .listRowBackground(Color.clear)
+    }
+
     private var summarySection: some View {
         Section {
             HStack(spacing: 0) {
@@ -105,7 +155,7 @@ struct StatsView: View {
     private var chartSection: some View {
         Section {
             if filteredEvents.isEmpty {
-                Text("No activity this \(period.rawValue.lowercased()).")
+                Text("No activity — \(periodLabel).")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 40)
@@ -184,7 +234,7 @@ struct StatsView: View {
     private var timerSummarySection: some View {
         Section("Timer") {
             if filteredNotes.isEmpty {
-                Text("No timer sessions this \(period.rawValue.lowercased()).")
+                Text("No timer sessions — \(periodLabel).")
                     .foregroundStyle(.secondary)
             } else {
                 HStack(spacing: 0) {
@@ -444,7 +494,7 @@ struct StatsView: View {
 
     private var filteredNotes: [TimerNote] {
         let cal = Calendar.current
-        let now = Date()
+        let now = referenceDate
         let component: Calendar.Component = {
             switch period {
             case .day:   return .day
@@ -465,7 +515,7 @@ struct StatsView: View {
 
     private var timerChartData: [TimerChartPoint] {
         let cal = Calendar.current
-        let now = Date()
+        let now = referenceDate
 
         let bucketStarts: [Date]
         switch period {
@@ -507,6 +557,78 @@ struct StatsView: View {
         let m = Int(minutes) % 60
         if h == 0 { return "\(m)m" }
         return m == 0 ? "\(h)h" : "\(h)h \(m)m"
+    }
+
+    // MARK: - Period navigation (swipe/chevrons to browse previous days/weeks/months/years)
+
+    private var periodComponent: Calendar.Component {
+        switch period {
+        case .day:   return .day
+        case .week:  return .weekOfYear
+        case .month: return .month
+        case .year:  return .year
+        }
+    }
+
+    private var isAtCurrentPeriod: Bool {
+        let cal = Calendar.current
+        guard let refInterval = cal.dateInterval(of: periodComponent, for: referenceDate),
+              let nowInterval = cal.dateInterval(of: periodComponent, for: Date())
+        else { return true }
+        return refInterval == nowInterval
+    }
+
+    private func shiftPeriod(by delta: Int) {
+        let cal = Calendar.current
+        guard let candidate = cal.date(byAdding: periodComponent, value: delta, to: referenceDate) else { return }
+
+        // Never browse into the future beyond the current period.
+        if delta > 0,
+           let candidateInterval = cal.dateInterval(of: periodComponent, for: candidate),
+           let nowInterval = cal.dateInterval(of: periodComponent, for: Date()),
+           candidateInterval.start > nowInterval.start {
+            return
+        }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            referenceDate = candidate
+        }
+        focusExpanded = false
+        timerFocusExpanded = false
+    }
+
+    private var periodLabel: String {
+        let cal = Calendar.current
+        let now = Date()
+        guard let interval = cal.dateInterval(of: periodComponent, for: referenceDate) else { return "" }
+
+        switch period {
+        case .day:
+            if cal.isDateInToday(referenceDate) { return "Today" }
+            if cal.isDateInYesterday(referenceDate) { return "Yesterday" }
+            return referenceDate.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+
+        case .week:
+            if let nowInterval = cal.dateInterval(of: .weekOfYear, for: now), nowInterval == interval {
+                return "This Week"
+            }
+            if let lastWeekAnchor = cal.date(byAdding: .weekOfYear, value: -1, to: now),
+               let lastWeekInterval = cal.dateInterval(of: .weekOfYear, for: lastWeekAnchor),
+               lastWeekInterval == interval {
+                return "Last Week"
+            }
+            let start = interval.start
+            let end = cal.date(byAdding: .day, value: -1, to: interval.end) ?? interval.end
+            return "\(start.formatted(.dateTime.month(.abbreviated).day())) – \(end.formatted(.dateTime.month(.abbreviated).day()))"
+
+        case .month:
+            if cal.isDate(referenceDate, equalTo: now, toGranularity: .month) { return "This Month" }
+            return referenceDate.formatted(.dateTime.month(.wide).year())
+
+        case .year:
+            if cal.isDate(referenceDate, equalTo: now, toGranularity: .year) { return "This Year" }
+            return referenceDate.formatted(.dateTime.year())
+        }
     }
 
     // MARK: - Prompt chart helpers
@@ -555,7 +677,7 @@ struct StatsView: View {
 
     private var chartData: [ChartPoint] {
         let cal = Calendar.current
-        let now = Date()
+        let now = referenceDate
 
         let bucketStarts: [Date]
         switch period {
@@ -603,7 +725,7 @@ struct StatsView: View {
 
     private var filteredEvents: [PromptActionEvent] {
         let cal = Calendar.current
-        let now = Date()
+        let now = referenceDate
         let component: Calendar.Component = {
             switch period {
             case .day:   return .day
