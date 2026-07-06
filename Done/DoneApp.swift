@@ -29,6 +29,22 @@ struct DoneApp: App {
         center.delegate = notifDelegate
 
         NotificationsManager.shared.registerCategories()
+
+        // Settings.bundle defaults (Settings app → Done!) — must mirror the DefaultValue
+        // entries in Done/Settings.bundle/Root.plist and the per-category child pane plists.
+        UserDefaults.standard.register(defaults: [
+            "notification_intensity": 0.5,
+            "global_earliest_hour": 7,
+            "global_latest_hour": 20,
+            "quiet_daily_start": 0, "quiet_daily_end": 0, "quiet_daily_weekends": false,
+            "quiet_weekly_start": 0, "quiet_weekly_end": 0, "quiet_weekly_weekends": false,
+            "quiet_work_start": 17, "quiet_work_end": 9, "quiet_work_weekends": true,
+            "quiet_monthly_start": 0, "quiet_monthly_end": 0, "quiet_monthly_weekends": false,
+            "quiet_yearly_start": 0, "quiet_yearly_end": 0, "quiet_yearly_weekends": false,
+            "quiet_events_start": 0, "quiet_events_end": 0, "quiet_events_weekends": false,
+            "quiet_study_start": 0, "quiet_study_end": 0, "quiet_study_weekends": false,
+            "quiet_mentalhealth_start": 0, "quiet_mentalhealth_end": 0, "quiet_mentalhealth_weekends": false,
+        ])
     }
 
     var body: some Scene {
@@ -46,9 +62,13 @@ struct DoneApp: App {
                         performOneOffCleanup()
 
                         let prompts = loadAllPromptsFromDisk()
+                        let (rules, categoryQuietWindows, settingsChanged) = currentPromptSettings()
                         RandomPromptScheduler.shared.refreshScheduleToday(
                             allPrompts: prompts,
-                            workPromptIDs: loadWorkPromptIDsFromDisk()
+                            categoryPromptIDs: loadCategoryPromptIDsFromDisk(),
+                            categoryQuietWindows: categoryQuietWindows,
+                            rules: rules,
+                            forceRebuild: settingsChanged
                         )
 
                         NotificationsManager.shared.scheduleDailySummary(
@@ -66,9 +86,13 @@ struct DoneApp: App {
                         didPlanThisForeground = true
 
                         let prompts = loadAllPromptsFromDisk()
+                        let (rules, categoryQuietWindows, settingsChanged) = currentPromptSettings()
                         RandomPromptScheduler.shared.refreshScheduleToday(
                             allPrompts: prompts,
-                            workPromptIDs: loadWorkPromptIDsFromDisk()
+                            categoryPromptIDs: loadCategoryPromptIDsFromDisk(),
+                            categoryQuietWindows: categoryQuietWindows,
+                            rules: rules,
+                            forceRebuild: settingsChanged
                         )
 
                         NotificationsManager.shared.scheduleDailySummary(
@@ -84,12 +108,38 @@ struct DoneApp: App {
     }
 }
 
+// MARK: - Settings.bundle → scheduler config (Settings app → Done!)
+
+/// Reads global + per-category quiet-hours settings from the Settings app and reports
+/// whether anything changed since the last time we applied it, so the caller can force a
+/// same-day schedule rebuild (the scheduler otherwise only plans once per calendar day).
+private func currentPromptSettings() -> (
+    rules: RandomPromptRules,
+    categoryQuietWindows: [PromptCategory: CategoryQuietWindow],
+    changed: Bool
+) {
+    let rules = RandomPromptRules.loadFromUserDefaults()
+    let categoryQuietWindows = CategoryQuietWindow.loadAllFromUserDefaults()
+
+    let windowsSignature = categoryQuietWindows
+        .sorted { $0.key.settingsKey < $1.key.settingsKey }
+        .map { "\($0.key.settingsKey):\($0.value.startHour)-\($0.value.endHour)-\($0.value.weekendsQuiet)" }
+        .joined(separator: ",")
+    let signature = "\(rules.intervalMinutes)|\(rules.dayStartHour)|\(rules.dayEndHour)|\(windowsSignature)"
+
+    let defaults = UserDefaults.standard
+    let lastAppliedKey = "last_applied_prompt_settings_signature"
+    let changed = defaults.string(forKey: lastAppliedKey) != signature
+    defaults.set(signature, forKey: lastAppliedKey)
+
+    return (rules, categoryQuietWindows, changed)
+}
+
 // MARK: - Prompts load helpers (PromptsStore in Storage/PromptsStore.swift owns persistence)
 
-/// Returns UUIDs of Work-category prompts for time-gating in the random scheduler.
-private func loadWorkPromptIDsFromDisk() -> Set<UUID> {
-    guard let s = PromptsStore.loadSafe() else { return [] }
-    return Set(s.workLists.allItems.map(\.id))
+/// Returns prompt IDs grouped by category, for per-category quiet-hours filtering.
+private func loadCategoryPromptIDsFromDisk() -> [PromptCategory: Set<UUID>] {
+    PromptsStore.loadSafe()?.categoryPromptIDs ?? [:]
 }
 
 /// Returns all prompt items across all categories for scheduling.

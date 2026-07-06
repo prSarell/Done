@@ -28,6 +28,67 @@ struct RandomPromptRules: Codable {
     var jitterMinutes: Int = 2              // small +/- jitter to feel organic
 }
 
+/// A quiet window for one prompt category: prompts from that category are suppressed
+/// between `startHour` and `endHour` (wrapping past midnight if `startHour > endHour`),
+/// and optionally suppressed all day on weekends. `startHour == endHour` with
+/// `weekendsQuiet == false` means "no quiet window" (never suppressed).
+struct CategoryQuietWindow: Codable {
+    var startHour: Int = 0
+    var endHour: Int = 0
+    var weekendsQuiet: Bool = false
+
+    func isQuiet(at date: Date, cal: Calendar) -> Bool {
+        let weekday = cal.component(.weekday, from: date) // 1 = Sun, 7 = Sat
+        if weekendsQuiet && (weekday == 1 || weekday == 7) { return true }
+        guard startHour != endHour else { return false }
+        let hour = cal.component(.hour, from: date)
+        return startHour < endHour
+            ? (hour >= startHour && hour < endHour)
+            : (hour >= startHour || hour < endHour)
+    }
+}
+
+extension CategoryQuietWindow {
+    /// Reads the per-category quiet-hours settings registered from Settings.bundle
+    /// (see `Done/Settings.bundle/<Category>.plist` and the defaults registered in
+    /// `DoneApp.init()`).
+    static func loadAllFromUserDefaults() -> [PromptCategory: CategoryQuietWindow] {
+        let defaults = UserDefaults.standard
+        return Dictionary(uniqueKeysWithValues: PromptCategory.allCases.map { category in
+            let key = category.settingsKey
+            let window = CategoryQuietWindow(
+                startHour: defaults.integer(forKey: "quiet_\(key)_start"),
+                endHour: defaults.integer(forKey: "quiet_\(key)_end"),
+                weekendsQuiet: defaults.bool(forKey: "quiet_\(key)_weekends")
+            )
+            return (category, window)
+        })
+    }
+}
+
+extension RandomPromptRules {
+    /// Builds rules from the Settings.bundle-backed UserDefaults keys registered in
+    /// `DoneApp.init()`, falling back to this struct's own defaults if unset.
+    static func loadFromUserDefaults() -> RandomPromptRules {
+        let defaults = UserDefaults.standard
+        var rules = RandomPromptRules()
+        rules.intervalMinutes = intervalMinutes(forIntensity: defaults.double(forKey: "notification_intensity"))
+        rules.dayStartHour = defaults.integer(forKey: "global_earliest_hour")
+        rules.dayEndHour = defaults.integer(forKey: "global_latest_hour")
+        return rules
+    }
+
+    /// Piecewise map from the `notification_intensity` slider to minutes between prompts:
+    /// cold (0.0) ≈ 60min, default (0.5) ≈ 20min, hot (1.0) ≈ 10min.
+    private static func intervalMinutes(forIntensity intensity: Double) -> Int {
+        let clamped = min(max(intensity, 0), 1)
+        let minutes = clamped <= 0.5
+            ? 60 - 80 * clamped
+            : 30 - 20 * clamped
+        return Int(minutes.rounded())
+    }
+}
+
 // NOTE: using your existing PromptItem from PromptsView persistence.
 
 final class RandomPromptScheduler {
@@ -66,7 +127,8 @@ final class RandomPromptScheduler {
     /// Call on app launch / when prompts change. Plans *today’s* notifications once.
     func refreshScheduleToday(
         allPrompts: [PromptItem],
-        workPromptIDs: Set<UUID> = [],
+        categoryPromptIDs: [PromptCategory: Set<UUID>] = [:],
+        categoryQuietWindows: [PromptCategory: CategoryQuietWindow] = [:],
         rules: RandomPromptRules = .init(),
         forceRebuild: Bool = false
     ) {
@@ -80,7 +142,8 @@ final class RandomPromptScheduler {
         ScheduledPromptScheduler.shared.refreshSchedule(prompts: allPrompts) { [weak self] in
             self?.continueRefreshAfterScheduledPlanning(
                 allPrompts: allPrompts,
-                workPromptIDs: workPromptIDs,
+                categoryPromptIDs: categoryPromptIDs,
+                categoryQuietWindows: categoryQuietWindows,
                 rules: rules,
                 forceRebuild: forceRebuild
             )
@@ -89,7 +152,8 @@ final class RandomPromptScheduler {
 
     private func continueRefreshAfterScheduledPlanning(
         allPrompts: [PromptItem],
-        workPromptIDs: Set<UUID>,
+        categoryPromptIDs: [PromptCategory: Set<UUID>],
+        categoryQuietWindows: [PromptCategory: CategoryQuietWindow],
         rules: RandomPromptRules,
         forceRebuild: Bool
     ) {
@@ -170,7 +234,8 @@ final class RandomPromptScheduler {
             // Continue planning after cleanup
             self.planNow(
                 allPrompts: allPrompts,
-                workPromptIDs: workPromptIDs,
+                categoryPromptIDs: categoryPromptIDs,
+                categoryQuietWindows: categoryQuietWindows,
                 rules: rules,
                 history: history,
                 todayKey: todayKey,
@@ -185,7 +250,8 @@ final class RandomPromptScheduler {
 
     private func planNow(
         allPrompts: [PromptItem],
-        workPromptIDs: Set<UUID>,
+        categoryPromptIDs: [PromptCategory: Set<UUID>],
+        categoryQuietWindows: [PromptCategory: CategoryQuietWindow],
         rules: RandomPromptRules,
         history: History,
         todayKey: String,
@@ -337,9 +403,12 @@ final class RandomPromptScheduler {
         for (i, time) in times.enumerated() {
             var eligible = PromptSelector.eligible(from: pool, rules: perPromptRules, at: time, cal: cal)
 
-            // Work prompts only appear Mon–Fri 9am–5pm
-            if !workPromptIDs.isEmpty && !Self.isWorkHours(at: time, cal: cal) {
-                eligible = eligible.filter { !workPromptIDs.contains($0.id) }
+            // Suppress prompts from any category currently inside its quiet window
+            // (e.g. Work defaults to quiet outside Mon–Fri 9am–5pm).
+            for (category, ids) in categoryPromptIDs where !ids.isEmpty {
+                if let window = categoryQuietWindows[category], window.isQuiet(at: time, cal: cal) {
+                    eligible = eligible.filter { !ids.contains($0.id) }
+                }
             }
 
             guard let next = pickNextPrompt(fromEligible: eligible, lastText: lastText, rng: &rng) else {
@@ -399,16 +468,6 @@ final class RandomPromptScheduler {
         }
 
         return eligible.randomElement(using: &rng) ?? eligible.first
-    }
-
-    // MARK: - Work-hours gate
-
-    /// True when `date` falls on a weekday (Mon–Fri) between 9am and 5pm.
-    private static func isWorkHours(at date: Date, cal: Calendar) -> Bool {
-        let weekday = cal.component(.weekday, from: date) // 1 = Sun, 7 = Sat
-        guard weekday >= 2 && weekday <= 6 else { return false }
-        let hour = cal.component(.hour, from: date)
-        return hour >= 9 && hour < 17
     }
 
     // MARK: - IDs / History IO

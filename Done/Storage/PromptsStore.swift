@@ -84,6 +84,15 @@ extension PromptsState {
     var allItems: [PromptItem] {
         allCategoryLists.flatMap { $0.allItems }
     }
+
+    /// Prompt IDs grouped by category, for per-category quiet-hours filtering in
+    /// `RandomPromptScheduler`. Relies on `PromptCategory.allCases` and `allCategoryLists`
+    /// being declared in the same daily/weekly/work/monthly/yearly/events/study/mentalHealth order.
+    var categoryPromptIDs: [PromptCategory: Set<UUID>] {
+        Dictionary(uniqueKeysWithValues: zip(PromptCategory.allCases, allCategoryLists).map { category, lists in
+            (category, Set(lists.allItems.map(\.id)))
+        })
+    }
 }
 
 /// Single source of truth for reading/writing prompts.json, replacing three previously

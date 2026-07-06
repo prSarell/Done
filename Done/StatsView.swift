@@ -367,7 +367,9 @@ struct StatsView: View {
 
         RandomPromptScheduler.shared.refreshScheduleToday(
             allPrompts: state.allItems,
-            workPromptIDs: Set(state.workLists.allItems.map(\.id)),
+            categoryPromptIDs: state.categoryPromptIDs,
+            categoryQuietWindows: CategoryQuietWindow.loadAllFromUserDefaults(),
+            rules: RandomPromptRules.loadFromUserDefaults(),
             forceRebuild: true
         )
 

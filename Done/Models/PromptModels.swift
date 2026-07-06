@@ -26,6 +26,23 @@ enum PromptCategory: String, CaseIterable, Identifiable, Codable {
     var id: String { rawValue }
 }
 
+extension PromptCategory {
+    /// Stable key used for Settings.bundle UserDefaults keys — independent of `rawValue`
+    /// (a user-facing display string) so a future label change can't break saved settings.
+    var settingsKey: String {
+        switch self {
+        case .daily: "daily"
+        case .weekly: "weekly"
+        case .work: "work"
+        case .monthly: "monthly"
+        case .yearly: "yearly"
+        case .events: "events"
+        case .study: "study"
+        case .mentalHealth: "mentalhealth"
+        }
+    }
+}
+
 /// A named sub-list of prompts within a category (e.g. "Shopping" inside Daily).
 struct PromptList: Identifiable, Hashable, Codable {
     var id: UUID

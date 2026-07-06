@@ -209,6 +209,16 @@ struct PromptsView: View {
         PromptCategory.allCases.map { listsBinding(for: $0) }
     }
 
+    /// Mirrors the 8 @State category lists into a `PromptsState` just to reuse its
+    /// `categoryPromptIDs` grouping — avoids re-deriving the category mapping here.
+    private var categoryPromptIDs: [PromptCategory: Set<UUID>] {
+        PromptsState(
+            dailyLists: dailyLists, weeklyLists: weeklyLists, workLists: workLists,
+            monthlyLists: monthlyLists, yearlyLists: yearlyLists, eventsLists: eventsLists,
+            studyLists: studyLists, mentalHealthLists: mentalHealthLists
+        ).categoryPromptIDs
+    }
+
     private func scheduleRandomPromptsDebounced(forceRebuild: Bool) {
         scheduleTask?.cancel()
         scheduleTask = Task { @MainActor in
@@ -216,7 +226,9 @@ struct PromptsView: View {
             if Task.isCancelled { return }
             RandomPromptScheduler.shared.refreshScheduleToday(
                 allPrompts: allPromptItems,
-                workPromptIDs: Set(workLists.allItems.map(\.id)),
+                categoryPromptIDs: categoryPromptIDs,
+                categoryQuietWindows: CategoryQuietWindow.loadAllFromUserDefaults(),
+                rules: RandomPromptRules.loadFromUserDefaults(),
                 forceRebuild: forceRebuild
             )
         }
@@ -304,7 +316,9 @@ struct PromptsView: View {
             // Plan once based on loaded data (NOT repeatedly during load)
             RandomPromptScheduler.shared.refreshScheduleToday(
                 allPrompts: allPromptItems,
-                workPromptIDs: Set(workLists.allItems.map(\.id)),
+                categoryPromptIDs: categoryPromptIDs,
+                categoryQuietWindows: CategoryQuietWindow.loadAllFromUserDefaults(),
+                rules: RandomPromptRules.loadFromUserDefaults(),
                 forceRebuild: true
             )
         }

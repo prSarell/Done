@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>StringsTable</key>
+	<string>Root</string>
+	<key>PreferenceSpecifiers</key>
+	<array>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
+			<string>Notification Frequency</string>
+			<key>FooterText</key>
+			<string>Cold = fewer reminders (about every 60 minutes). Hot = more reminders (about every 10 minutes).</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSSliderSpecifier</string>
+			<key>Key</key>
+			<string>notification_intensity</string>
+			<key>DefaultValue</key>
+			<real>0.5</real>
+			<key>MinimumValue</key>
+			<real>0</real>
+			<key>MaximumValue</key>
+			<real>1</real>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
+			<string>Quiet Hours (All Categories)</string>
+			<key>FooterText</key>
+			<string>No prompts fire before Earliest Reminder or after Latest Reminder, whatever the per-category settings below say.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Title</key>
+			<string>Earliest Reminder</string>
+			<key>Key</key>
+			<string>global_earliest_hour</string>
+			<key>DefaultValue</key>
+			<integer>7</integer>
+			<key>Titles</key>
+			<array>
+				<string>12 AM</string>
+				<string>1 AM</string>
+				<string>2 AM</string>
+				<string>3 AM</string>
+				<string>4 AM</string>
+				<string>5 AM</string>
+				<string>6 AM</string>
+				<string>7 AM</string>
+				<string>8 AM</string>
+				<string>9 AM</string>
+				<string>10 AM</string>
+				<string>11 AM</string>
+				<string>12 PM</string>
+				<string>1 PM</string>
+				<string>2 PM</string>
+				<string>3 PM</string>
+				<string>4 PM</string>
+				<string>5 PM</string>
+				<string>6 PM</string>
+				<string>7 PM</string>
+				<string>8 PM</string>
+				<string>9 PM</string>
+				<string>10 PM</string>
+				<string>11 PM</string>
+			</array>
+			<key>Values</key>
+			<array>
+				<integer>0</integer>
+				<integer>1</integer>
+				<integer>2</integer>
+				<integer>3</integer>
+				<integer>4</integer>
+				<integer>5</integer>
+				<integer>6</integer>
+				<integer>7</integer>
+				<integer>8</integer>
+				<integer>9</integer>
+				<integer>10</integer>
+				<integer>11</integer>
+				<integer>12</integer>
+				<integer>13</integer>
+				<integer>14</integer>
+				<integer>15</integer>
+				<integer>16</integer>
+				<integer>17</integer>
+				<integer>18</integer>
+				<integer>19</integer>
+				<integer>20</integer>
+				<integer>21</integer>
+				<integer>22</integer>
+				<integer>23</integer>
+			</array>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Title</key>
+			<string>Latest Reminder</string>
+			<key>Key</key>
+			<string>global_latest_hour</string>
+			<key>DefaultValue</key>
+			<integer>20</integer>
+			<key>Titles</key>
+			<array>
+				<string>12 AM</string>
+				<string>1 AM</string>
+				<string>2 AM</string>
+				<string>3 AM</string>
+				<string>4 AM</string>
+				<string>5 AM</string>
+				<string>6 AM</string>
+				<string>7 AM</string>
+				<string>8 AM</string>
+				<string>9 AM</string>
+				<string>10 AM</string>
+				<string>11 AM</string>
+				<string>12 PM</string>
+				<string>1 PM</string>
+				<string>2 PM</string>
+				<string>3 PM</string>
+				<string>4 PM</string>
+				<string>5 PM</string>
+				<string>6 PM</string>
+				<string>7 PM</string>
+				<string>8 PM</string>
+				<string>9 PM</string>
+				<string>10 PM</string>
+				<string>11 PM</string>
+			</array>
+			<key>Values</key>
+			<array>
+				<integer>0</integer>
+				<integer>1</integer>
+				<integer>2</integer>
+				<integer>3</integer>
+				<integer>4</integer>
+				<integer>5</integer>
+				<integer>6</integer>
+				<integer>7</integer>
+				<integer>8</integer>
+				<integer>9</integer>
+				<integer>10</integer>
+				<integer>11</integer>
+				<integer>12</integer>
+				<integer>13</integer>
+				<integer>14</integer>
+				<integer>15</integer>
+				<integer>16</integer>
+				<integer>17</integer>
+				<integer>18</integer>
+				<integer>19</integer>
+				<integer>20</integer>
+				<integer>21</integer>
+				<integer>22</integer>
+				<integer>23</integer>
+			</array>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
+			<string>Per-Category Quiet Hours</string>
+			<key>FooterText</key>
+			<string>Set a quiet window per category, e.g. no Work prompts outside 9am-5pm on weekdays.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSChildPaneSpecifier</string>
+			<key>Title</key>
+			<string>Daily</string>
+			<key>File</key>
+			<string>Daily</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSChildPaneSpecifier</string>
+			<key>Title</key>
+			<string>Weekly</string>
+			<key>File</key>
+			<string>Weekly</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSChildPaneSpecifier</string>
+			<key>Title</key>
+			<string>Work</string>
+			<key>File</key>
+			<string>Work</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSChildPaneSpecifier</string>
+			<key>Title</key>
+			<string>Monthly</string>
+			<key>File</key>
+			<string>Monthly</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSChildPaneSpecifier</string>
+			<key>Title</key>
+			<string>Yearly</string>
+			<key>File</key>
+			<string>Yearly</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSChildPaneSpecifier</string>
+			<key>Title</key>
+			<string>Events</string>
+			<key>File</key>
+			<string>Events</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSChildPaneSpecifier</string>
+			<key>Title</key>
+			<string>Study</string>
+			<key>File</key>
+			<string>Study</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSChildPaneSpecifier</string>
+			<key>Title</key>
+			<string>Health</string>
+			<key>File</key>
+			<string>MentalHealth</string>
+		</dict>
+	</array>
+</dict>
+</plist>
