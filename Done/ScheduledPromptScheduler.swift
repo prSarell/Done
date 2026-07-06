@@ -19,6 +19,11 @@ final class ScheduledPromptScheduler {
     private let globalNotificationCap: Int = 60               // stay safely under iOS 64 cap
     private let idPrefix = "sched-"
 
+    // Yearly prompts (birthdays, anniversaries, etc.) get a much longer runway than other
+    // recurrence kinds: reminders start at the full 30-day lead-in (see PromptRule.leadInStart)
+    // instead of only the next 24h, and ramp up in frequency approaching the date.
+    private let maxNotificationsPerYearlyPrompt: Int = 50
+
     // Near-target behaviour
     private let immediateWindow: TimeInterval = 5 * 60        // within 5 minutes -> fire immediately
     private let immediateLeadSeconds: TimeInterval = 5        // first alert 5 seconds from now
@@ -30,10 +35,15 @@ final class ScheduledPromptScheduler {
 
     // MARK: - Entry point
 
+    /// `onComplete` fires once this scheduler's own cancel/rebuild pass has fully settled
+    /// (on every exit path, including reentrancy/throttle skips), so callers that need to
+    /// coordinate a shared notification budget — see `RandomPromptScheduler` — can rely on
+    /// `sched-*` pending requests being in their final state by the time it's called.
     func refreshSchedule(
         prompts: [PromptItem],
         forceRebuild: Bool = true,
-        calendar cal: Calendar = .current
+        calendar cal: Calendar = .current,
+        onComplete: @escaping () -> Void = {}
     ) {
         #if DEBUG
         print("SPS: refreshSchedule called with \(prompts.count) prompts | forceRebuild=\(forceRebuild)")
@@ -45,6 +55,7 @@ final class ScheduledPromptScheduler {
             print("SPS: skipped refresh because a refresh is already in progress")
             #endif
             refreshLock.unlock()
+            onComplete()
             return
         }
         isRefreshing = true
@@ -56,6 +67,7 @@ final class ScheduledPromptScheduler {
             #endif
             isRefreshing = false
             refreshLock.unlock()
+            onComplete()
             return
         }
         lastRefreshAt = nowForThrottle
@@ -96,19 +108,18 @@ final class ScheduledPromptScheduler {
                 print("SPS: no scheduled prompts found, cancelled all sched-* notifications")
                 #endif
                 self?.finishRefresh()
+                onComplete()
             }
             return
         }
 
         NotificationsManager.shared.cancelAll(prefix: idPrefix) { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                onComplete()
+                return
+            }
 
             let now = Date()
-            let horizon = now.addingTimeInterval(self.horizonHours * 3600)
-
-            #if DEBUG
-            print("SPS: planning window \(now) -> \(horizon)")
-            #endif
 
             var allRequests: [PendingScheduledNotification] = []
 
@@ -138,12 +149,10 @@ final class ScheduledPromptScheduler {
                 }
 
                 let leadInStart = rule.leadInStart(for: target, now: now, calendar: cal)
+                let horizon = self.horizon(for: rule, target: target, now: now)
 
                 #if DEBUG
-                print("SPS: '\(prompt.text)' target=\(target) | leadInStart=\(leadInStart)")
-                if target > horizon {
-                    print("SPS: '\(prompt.text)' target is beyond 24h horizon — only lead-in notifications within horizon can be scheduled")
-                }
+                print("SPS: '\(prompt.text)' target=\(target) | leadInStart=\(leadInStart) | horizon=\(horizon)")
                 #endif
 
                 let dates = self.generateFireDates(
@@ -221,6 +230,7 @@ final class ScheduledPromptScheduler {
             #endif
 
             self.finishRefresh()
+            onComplete()
         }
     }
 
@@ -383,6 +393,21 @@ final class ScheduledPromptScheduler {
         events.contains { $0.promptID == promptID && $0.occurredAt >= cycleStart }
     }
 
+    // MARK: - Planning horizon
+
+    /// How far ahead we're willing to actually schedule notifications for a prompt.
+    /// Most recurrence kinds only plan the next 24h and rely on being re-run regularly
+    /// (app open/foreground) to roll the window forward day by day. Yearly prompts instead
+    /// get a horizon reaching all the way to their target (plus a short overdue buffer), so
+    /// the full 30-day lead-in ramp is queued up front and doesn't depend on the app being
+    /// reopened every day to keep showing up.
+    private func horizon(for rule: PromptRule, target: Date, now: Date) -> Date {
+        guard rule.recurrenceKind == .yearly else {
+            return now.addingTimeInterval(horizonHours * 3600)
+        }
+        return target.addingTimeInterval(24 * 3600)
+    }
+
     // MARK: - Fire date generation
 
     private func generateFireDates(
@@ -412,6 +437,17 @@ final class ScheduledPromptScheduler {
 
         // Date/weekday-only prompts: use the rolling lead-in cadence.
         let leadInStart = rule.leadInStart(for: target, now: now, calendar: cal)
+
+        // Not yet within the lead-in window — nothing to schedule. Most recurrence kinds
+        // relied on their short 24h horizon to make this a no-op automatically, but yearly's
+        // extended horizon reaches leadInStart regardless, so it needs this check explicitly.
+        guard now >= leadInStart else {
+            #if DEBUG
+            print("SPS: '\(prompt.text)' not yet within lead-in window (starts \(leadInStart))")
+            #endif
+            return []
+        }
+
         let start = max(now, leadInStart)
 
         #if DEBUG
@@ -424,6 +460,8 @@ final class ScheduledPromptScheduler {
             #endif
             return []
         }
+
+        let cap = rule.recurrenceKind == .yearly ? maxNotificationsPerYearlyPrompt : maxNotificationsPerPrompt
 
         var results: [Date] = []
         let minimumFireDate = now.addingTimeInterval(immediateLeadSeconds)
@@ -442,8 +480,8 @@ final class ScheduledPromptScheduler {
 
         var cursor = results.last ?? start
 
-        while cursor < horizon && results.count < maxNotificationsPerPrompt {
-            let baseInterval = cadence(for: cursor, target: target)
+        while cursor < horizon && results.count < cap {
+            let baseInterval = cadence(for: cursor, target: target, recurrenceKind: rule.recurrenceKind)
             let jittered = jitteredInterval(from: baseInterval)
 
             var next = cursor.addingTimeInterval(jittered)
@@ -481,13 +519,18 @@ final class ScheduledPromptScheduler {
         return results
     }
 
-    private func cadence(for date: Date, target: Date) -> TimeInterval {
+    private func cadence(for date: Date, target: Date, recurrenceKind: PromptRecurrenceKind) -> TimeInterval {
         if date >= target {
             return overdueInterval
         }
 
-        let maxCadence = TimeInterval(max(RandomPromptRules().intervalMinutes, 5) * 60)
         let hours = target.timeIntervalSince(date) / 3600
+
+        if recurrenceKind == .yearly {
+            return yearlyCadence(hoursRemaining: hours)
+        }
+
+        let maxCadence = TimeInterval(max(RandomPromptRules().intervalMinutes, 5) * 60)
 
         switch hours {
         case let h where h > 24 * 14:
@@ -504,6 +547,22 @@ final class ScheduledPromptScheduler {
             return 60 * 60
         default:
             return maxCadence
+        }
+    }
+
+    /// Once a day from the 30-day lead-in down to 10 days out, then ramping up as the date
+    /// approaches: twice a day (10-4 days out), four times a day (4-1 days out), and six
+    /// times a day on the final day itself.
+    private func yearlyCadence(hoursRemaining hours: Double) -> TimeInterval {
+        switch hours {
+        case let h where h > 24 * 10:
+            return 24 * 60 * 60
+        case let h where h > 24 * 4:
+            return 12 * 60 * 60
+        case let h where h > 24:
+            return 6 * 60 * 60
+        default:
+            return 4 * 60 * 60
         }
     }
 

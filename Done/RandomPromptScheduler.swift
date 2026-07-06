@@ -57,6 +57,12 @@ final class RandomPromptScheduler {
 
     // MARK: - Entry point
 
+    /// iOS silently drops pending local notifications once an app's total exceeds ~64.
+    /// Scheduled/dated prompts (see `ScheduledPromptScheduler`) get first claim on that
+    /// budget since they're time-specific; random prompts only fill what's left, keeping
+    /// the combined total safely under the OS cap.
+    private static let combinedNotificationCap = 60
+
     /// Call on app launch / when prompts change. Plans *today’s* notifications once.
     func refreshScheduleToday(
         allPrompts: [PromptItem],
@@ -68,9 +74,25 @@ final class RandomPromptScheduler {
         print("RPS: refreshScheduleToday called with \(allPrompts.count) prompts | forceRebuild=\(forceRebuild)")
         #endif
 
-        // Scheduled/date-driven prompts are handled by their own scheduler.
-        ScheduledPromptScheduler.shared.refreshSchedule(prompts: allPrompts)
+        // Scheduled/date-driven prompts are handled by their own scheduler. Wait for it to
+        // fully settle before planning random ones, so we know the real "sched-*" pending
+        // count and can size the random budget against it (see combinedNotificationCap).
+        ScheduledPromptScheduler.shared.refreshSchedule(prompts: allPrompts) { [weak self] in
+            self?.continueRefreshAfterScheduledPlanning(
+                allPrompts: allPrompts,
+                workPromptIDs: workPromptIDs,
+                rules: rules,
+                forceRebuild: forceRebuild
+            )
+        }
+    }
 
+    private func continueRefreshAfterScheduledPlanning(
+        allPrompts: [PromptItem],
+        workPromptIDs: Set<UUID>,
+        rules: RandomPromptRules,
+        forceRebuild: Bool
+    ) {
         guard !allPrompts.isEmpty else {
             #if DEBUG
             print("RPS: no prompts supplied, skipping random plan rebuild")
@@ -136,6 +158,15 @@ final class RandomPromptScheduler {
                 UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: randIDs)
             }
 
+            // ScheduledPromptScheduler has already finished its own cancel/rebuild pass by
+            // this point, so any "sched-*" requests here reflect its final pending count.
+            let schedCount = reqs.filter { $0.identifier.hasPrefix("sched-") }.count
+            let randomBudget = max(0, Self.combinedNotificationCap - schedCount)
+
+            #if DEBUG
+            print("RPS: \(schedCount) sched-* pending, leaving a budget of \(randomBudget) for random prompts")
+            #endif
+
             // Continue planning after cleanup
             self.planNow(
                 allPrompts: allPrompts,
@@ -144,7 +175,8 @@ final class RandomPromptScheduler {
                 history: history,
                 todayKey: todayKey,
                 now: now,
-                cal: cal
+                cal: cal,
+                randomBudget: randomBudget
             )
         }
     }
@@ -158,7 +190,8 @@ final class RandomPromptScheduler {
         history: History,
         todayKey: String,
         now: Date,
-        cal: Calendar
+        cal: Calendar,
+        randomBudget: Int
     ) {
         var history = history
 
@@ -262,13 +295,22 @@ final class RandomPromptScheduler {
         let start = max(start0, now)
         let end = end0 <= start ? start.addingTimeInterval(3600) : end0
 
-        // Generate slots from "next slot after now" up to end, capped at 64
-        let times = Self.generateEveryInterval(
+        // Generate slots from "next slot after now" up to end, capped at 64, then further
+        // capped by randomBudget so combined with ScheduledPromptScheduler's own pending
+        // requests we stay safely under iOS's ~64 pending-notification ceiling.
+        let generatedTimes = Self.generateEveryInterval(
             start: start,
             end: end,
             intervalMinutes: rules.intervalMinutes,
             jitterMinutes: rules.jitterMinutes
         )
+        let times = Array(generatedTimes.prefix(randomBudget))
+
+        #if DEBUG
+        if times.count < generatedTimes.count {
+            print("RPS: trimmed \(generatedTimes.count) candidate slots down to \(times.count) to respect randomBudget=\(randomBudget)")
+        }
+        #endif
 
         guard !times.isEmpty else {
             history.lastPlanDate = todayKey
