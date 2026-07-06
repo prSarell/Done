@@ -37,6 +37,7 @@ struct PromptRow: View {
     let alertLabel: String
     let isImportant: Bool
     let isDoneToday: Bool
+    let isSkippedToday: Bool
     let onAlertTap: () -> Void
     let onDone: () -> Void
     let onSkip: () -> Void
@@ -44,17 +45,27 @@ struct PromptRow: View {
     // where every row shown is already important by definition.
     var onToggleImportant: (() -> Void)? = nil
 
+    private static let skippedColor = Color(red: 0.4, green: 0.7, blue: 1.0)
+
+    private var isDimmed: Bool { isDoneToday || isSkippedToday }
+
+    private var tintColor: Color? {
+        if isDoneToday { return .secondary }
+        if isSkippedToday { return Self.skippedColor }
+        return nil
+    }
+
     var body: some View {
         HStack {
             if isImportant {
                 Image(systemName: "star.fill")
-                    .foregroundStyle(isDoneToday ? Color.secondary : Color.yellow)
+                    .foregroundStyle(tintColor ?? Color.yellow)
                     .font(.caption)
             }
             Text(item.text)
                 .lineLimit(2)
-                .strikethrough(isDoneToday)
-                .foregroundStyle(isDoneToday ? .secondary : .primary)
+                .strikethrough(isDimmed, color: tintColor)
+                .foregroundStyle(tintColor ?? .primary)
             Spacer()
 
             Button(action: onAlertTap) {
@@ -64,12 +75,12 @@ struct PromptRow: View {
                     .padding(.vertical, 4)
                     .background(
                         Capsule()
-                            .stroke(isDoneToday ? Color.secondary : Color.accentColor, lineWidth: 1)
+                            .stroke(tintColor ?? Color.accentColor, lineWidth: 1)
                     )
             }
             .buttonStyle(.plain)
         }
-        .opacity(isDoneToday ? 0.5 : 1)
+        .opacity(isDimmed ? 0.5 : 1)
         .contextMenu {
             Button { onDone() } label: {
                 Label("Mark Done", systemImage: "checkmark.circle.fill")
@@ -141,6 +152,9 @@ struct PromptsView: View {
 
     // Prompt IDs marked done today — greyed out until the day rolls over
     @State private var doneTodayPromptIDs: Set<UUID> = []
+
+    // Prompt IDs skipped today — shown blued-out with a strikethrough until the day rolls over
+    @State private var skippedTodayPromptIDs: Set<UUID> = []
 
     // Reward overlay shown when an important prompt is marked done
     @State private var rewardMessage: String? = nil
@@ -420,6 +434,7 @@ struct PromptsView: View {
                         alertLabel: PromptAlertEditorModel.label(for: rules[item.id.uuidString]),
                         isImportant: rules[item.id.uuidString]?.isImportant == true,
                         isDoneToday: doneTodayPromptIDs.contains(item.id),
+                        isSkippedToday: skippedTodayPromptIDs.contains(item.id),
                         onAlertTap: {
                             alertEditor.begin(rule: rules[item.id.uuidString]) { newRule in
                                 rules[item.id.uuidString] = newRule
@@ -536,7 +551,8 @@ struct PromptsView: View {
             }
         }
 
-        // Done removes the prompt unless it is a repeating schedule (those come back by design)
+        // Done greys the prompt out for the rest of the day; one-off prompts are then
+        // purged overnight (see purgeCompletedOneOffPrompts), repeating ones come back by design.
         if action == .done {
             doneTodayPromptIDs.insert(item.id)
             NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
@@ -544,14 +560,11 @@ struct PromptsView: View {
             if rule?.isImportant == true {
                 triggerReward()
             }
-            if rule?.oneOff != false {
-                switch rule?.recurrenceKind {
-                case nil, .none?, .oneOff:
-                    removePrompt(item)
-                default:
-                    break  // keep repeating prompts in the list
-                }
-            }
+        }
+
+        // Skip just blues the prompt out with a strikethrough for the rest of the day.
+        if action == .skipped {
+            skippedTodayPromptIDs.insert(item.id)
         }
 
         scheduleRandomPromptsDebounced(forceRebuild: true)
@@ -595,12 +608,13 @@ struct PromptsView: View {
 
     // MARK: - Done cleanup
 
-    /// Removes prompts marked done via notification, unless they are repeating.
+    /// Removes one-off prompts that were marked done on a previous day, so they stay greyed
+    /// out on the list for the rest of the day they were completed, then disappear overnight.
     /// Called on launch and when the app returns to the foreground.
     private func purgeCompletedOneOffPrompts() {
         let doneIDs = Set(
             PromptStatusStore.load()
-                .filter { $0.action == .done }
+                .filter { $0.action == .done && !Calendar.current.isDateInToday($0.occurredAt) }
                 .map { $0.promptID }
         )
         guard !doneIDs.isEmpty else { return }
@@ -631,13 +645,19 @@ struct PromptsView: View {
         }
     }
 
-    /// Recomputes which prompts were marked done today, so their rows can be greyed out.
-    /// Prompts marked done on a prior day fall out of this set automatically, making them
-    /// markable again.
+    /// Recomputes which prompts were marked done or skipped today, so their rows can show
+    /// the greyed-out/"Skipped" treatment. Prompts actioned on a prior day fall out of these
+    /// sets automatically, making them markable again.
     private func refreshDoneTodaySet() {
+        let events = PromptStatusStore.load()
         doneTodayPromptIDs = Set(
-            PromptStatusStore.load()
+            events
                 .filter { $0.action == .done && Calendar.current.isDateInToday($0.occurredAt) }
+                .map { $0.promptID }
+        )
+        skippedTodayPromptIDs = Set(
+            events
+                .filter { $0.action == .skipped && Calendar.current.isDateInToday($0.occurredAt) }
                 .map { $0.promptID }
         )
     }

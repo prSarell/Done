@@ -22,6 +22,7 @@ struct StatsView: View {
     @State private var importantWork: [PromptItem] = []
     @State private var rules: [String: PromptRule] = [:]
     @State private var doneTodayPromptIDs: Set<UUID> = []
+    @State private var skippedTodayPromptIDs: Set<UUID> = []
 
     @State private var rewardMessage: String? = nil
     @State private var rewardColor: Color = .blue
@@ -311,6 +312,7 @@ struct StatsView: View {
             alertLabel: PromptAlertEditorModel.label(for: rules[item.id.uuidString]),
             isImportant: true,
             isDoneToday: doneTodayPromptIDs.contains(item.id),
+            isSkippedToday: skippedTodayPromptIDs.contains(item.id),
             onAlertTap: {
                 alertEditor.begin(rule: rules[item.id.uuidString]) { newRule in
                     persistRuleChange(for: item, newRule: newRule)
@@ -349,36 +351,19 @@ struct StatsView: View {
             }
         }
 
+        if action == .skipped {
+            skippedTodayPromptIDs.insert(item.id)
+        }
+
         guard action == .done else { return }
 
         doneTodayPromptIDs.insert(item.id)
         NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
         triggerReward()   // everything in this list is important by definition
 
-        guard var state = PromptsStore.loadSafe() else { return }
-        var rules = PromptRulesStore.loadMigratingIfNeeded(using: state.allItems)
-
-        let rule = rules[item.id.uuidString]
-        let shouldRemove: Bool
-        if rule?.oneOff == false {
-            shouldRemove = false
-        } else {
-            switch rule?.recurrenceKind {
-            case nil, .none?, .oneOff: shouldRemove = true
-            default:                   shouldRemove = false
-            }
-        }
-
-        if shouldRemove {
-            for keyPath in Self.promptListKeyPaths {
-                for idx in state[keyPath: keyPath].indices {
-                    state[keyPath: keyPath][idx].items.removeAll { $0.id == item.id }
-                }
-            }
-            rules[item.id.uuidString] = nil
-            PromptsStore.save(state)
-            PromptRulesStore.save(rules)
-        }
+        // Greys the prompt out for the rest of the day; one-off prompts are purged
+        // overnight by PromptsView.purgeCompletedOneOffPrompts, mirroring markPrompt(_:action:).
+        guard let state = PromptsStore.loadSafe() else { return }
 
         RandomPromptScheduler.shared.refreshScheduleToday(
             allPrompts: state.allItems,
@@ -405,9 +390,15 @@ struct StatsView: View {
     ]
 
     private func refreshDoneTodaySet() {
+        let events = PromptStatusStore.load()
         doneTodayPromptIDs = Set(
-            PromptStatusStore.load()
+            events
                 .filter { $0.action == .done && Calendar.current.isDateInToday($0.occurredAt) }
+                .map { $0.promptID }
+        )
+        skippedTodayPromptIDs = Set(
+            events
+                .filter { $0.action == .skipped && Calendar.current.isDateInToday($0.occurredAt) }
                 .map { $0.promptID }
         )
     }

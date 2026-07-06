@@ -165,8 +165,9 @@ final class NotificationsManager {
 
         let bonusNoun = bonusCount == 1 ? "task" : "tasks"
         let totalNoun = totalCount == 1 ? "task" : "tasks"
-        let title = "\(bonusCount) more \(bonusNoun) done after 9pm — \(totalCount) \(totalNoun) done yesterday!"
-        scheduleOneOff(id: id, title: title, at: fireDate)
+        let title = "\(totalCount) \(totalNoun) done yesterday!"
+        let subtitle = "\(bonusCount) more \(bonusNoun) done after 9pm"
+        scheduleOneOff(id: id, title: title, at: fireDate, subtitle: subtitle)
     }
 
     private static func dateKey(for date: Date) -> String {
