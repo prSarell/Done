@@ -694,14 +694,18 @@ struct PromptsView: View {
     }
 
     /// Fixes rules where oneOff=true was accidentally written over a real recurrence structure
-    /// (weekday, monthly, fortnightly, or yearly fields). oneOff=true only makes sense alongside
-    /// an explicit date or a bare time — pairing it with recurrence fields is always wrong.
+    /// (monthly, fortnightly, or yearly fields). Those fields are only ever set by the alert
+    /// editor when Repeat is selected (see `PromptAlertEditorModel.save()`, which clears all
+    /// four whenever `repeats == false`), so seeing them alongside oneOff=true is never a
+    /// legitimate save — it can only be leftover/corrupted data. `weekday` is deliberately not
+    /// included here: unlike the other four, it's set independent of the Repeat/Once choice, so
+    /// "Day" + "Once" (e.g. "remind me once, next Monday") is a normal, reachable combination —
+    /// treating it as corrupted silently reverted the user's Once choice back to Repeat.
     private func repairCorruptedRules() {
         var changed = false
         for (key, rule) in rules {
             guard rule.oneOff == true else { continue }
-            let hasRecurrence = rule.weekday != nil
-                || rule.monthlyDay != nil
+            let hasRecurrence = rule.monthlyDay != nil
                 || (rule.monthlyIsLastDay ?? false)
                 || rule.fortnightlyAnchorDate != nil
                 || (rule.month != nil && rule.day != nil)

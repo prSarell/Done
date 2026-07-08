@@ -437,15 +437,25 @@ final class ScheduledPromptScheduler {
                 return results
             }
 
+            // A bare time-only rule with oneOff == false (e.g. "repeat every day at 9am")
+            // has no `date`, so its base day is always `now`-relative (see
+            // effectiveOneOffBaseDay) — today's occurrence already rolls over to tomorrow's
+            // on the next refresh with no help needed. Catching it up here would instead
+            // spam notifications starting the moment the rule is created/refreshed after
+            // today's time has already passed, even though nothing was ever missed.
+            // Only a genuinely dated one-off, or an explicit "Once" bare-time reminder
+            // (which self-purges ~24h later regardless), warrants the catch-up below.
+            let isSelfRollingDailyReminder = (rule.date == nil && rule.oneOff == false)
+
             // All four candidates already passed — this only means the prompt is overdue
             // (not that it's too far in the future to schedule yet) when `target` itself
             // is in the past. Without a catch-up here, a target missed by more than ~30
             // minutes (e.g. app wasn't opened) would get zero notifications for the whole
             // cycle, mirroring the rolling overdue cadence used below for date/weekday-only
             // prompts instead of going silent.
-            guard now > target else {
+            guard !isSelfRollingDailyReminder, now > target else {
                 #if DEBUG
-                print("SPS: '\(prompt.text)' time-window produced no dates and target isn't overdue")
+                print("SPS: '\(prompt.text)' time-window produced no dates; skipping catch-up (selfRolling=\(isSelfRollingDailyReminder))")
                 #endif
                 return []
             }

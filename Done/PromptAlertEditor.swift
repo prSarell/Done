@@ -27,9 +27,19 @@ final class PromptAlertEditorModel: ObservableObject {
 
     private var onCommit: ((PromptRule?) -> Void)?
 
+    // The editor only exposes day/date/time/repeat fields, but a rule can also carry
+    // importance and an active-window size that this editor doesn't show. Both `save()`
+    // and `clearRule()` build a fresh `PromptRule`, so without carrying these over
+    // explicitly, every edit (even just toggling Once/Repeat) silently reset a prompt's
+    // "Important" flag back to false.
+    private var existingIsImportant: Bool?
+    private var existingWindowMinutes: Int = 120
+
     func begin(rule: PromptRule?, onCommit: @escaping (PromptRule?) -> Void) {
         self.onCommit = onCommit
         hasExistingRule = rule != nil
+        existingIsImportant = rule?.isImportant
+        existingWindowMinutes = rule?.windowMinutes ?? 120
 
         let now = Date()
         let cal = Calendar.current
@@ -100,18 +110,26 @@ final class PromptAlertEditorModel: ObservableObject {
         // identity — committing bare `nil` here previously made the item indistinguishable
         // from a genuine one-off, so it got purged by purgeCompletedOneOffPrompts the next
         // time it was marked done, even for ordinary recurring prompts.
-        onCommit?(PromptRule(oneOff: !repeats))
+        var rule = PromptRule(oneOff: !repeats)
+        rule.isImportant = existingIsImportant
+        rule.windowMinutes = existingWindowMinutes
+        onCommit?(rule)
         isPresented = false
     }
 
     func save() {
         guard dayEnabled || dateEnabled || timeEnabled else {
-            onCommit?(PromptRule(oneOff: !repeats))
+            var rule = PromptRule(oneOff: !repeats)
+            rule.isImportant = existingIsImportant
+            rule.windowMinutes = existingWindowMinutes
+            onCommit?(rule)
             isPresented = false
             return
         }
 
         var rule = PromptRule()
+        rule.isImportant = existingIsImportant
+        rule.windowMinutes = existingWindowMinutes
         let cal = Calendar.current
 
         if dayEnabled { rule.weekday = weekday } else { rule.weekday = nil }
