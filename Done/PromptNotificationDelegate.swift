@@ -59,6 +59,7 @@ final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelega
 
         if action == .done {
             NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
+            NotificationsManager.shared.scheduleDailySummary(doneCount: doneTodayCount())
         }
 
         #if DEBUG

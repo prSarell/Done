@@ -73,7 +73,7 @@ final class ScheduledPromptScheduler {
         lastRefreshAt = nowForThrottle
         refreshLock.unlock()
 
-        let rulesByID = PromptRulesStore.load()
+        let rulesByID = PromptRulesStore.load() ?? [:]
         let events = PromptStatusStore.load()
 
         #if DEBUG
@@ -429,10 +429,39 @@ final class ScheduledPromptScheduler {
                 target.addingTimeInterval(30 * 60)
             ]
             let results = candidates.filter { $0 >= minimumFireDate && $0 <= horizon }
+
+            if !results.isEmpty {
+                #if DEBUG
+                print("SPS: '\(prompt.text)' time-window fire dates: \(results)")
+                #endif
+                return results
+            }
+
+            // All four candidates already passed — this only means the prompt is overdue
+            // (not that it's too far in the future to schedule yet) when `target` itself
+            // is in the past. Without a catch-up here, a target missed by more than ~30
+            // minutes (e.g. app wasn't opened) would get zero notifications for the whole
+            // cycle, mirroring the rolling overdue cadence used below for date/weekday-only
+            // prompts instead of going silent.
+            guard now > target else {
+                #if DEBUG
+                print("SPS: '\(prompt.text)' time-window produced no dates and target isn't overdue")
+                #endif
+                return []
+            }
+
+            let cap = rule.recurrenceKind == .yearly ? maxNotificationsPerYearlyPrompt : maxNotificationsPerPrompt
+            var overdueResults: [Date] = []
+            var cursor = minimumFireDate
+            while cursor < horizon && overdueResults.count < cap {
+                overdueResults.append(cursor)
+                cursor = cursor.addingTimeInterval(jitteredInterval(from: overdueInterval))
+            }
+
             #if DEBUG
-            print("SPS: '\(prompt.text)' time-window fire dates: \(results)")
+            print("SPS: '\(prompt.text)' time-window overdue catch-up fire dates: \(overdueResults)")
             #endif
-            return results
+            return overdueResults
         }
 
         // Date/weekday-only prompts: use the rolling lead-in cadence.

@@ -495,9 +495,14 @@ public enum PromptRulesStore {
     /// id-based keys for every item in `allItems`. Copies rather than moves the legacy
     /// entry, since one legacy text could map to several ids (e.g. same wording reused
     /// across different sub-lists) and leaving the old key behind is harmless.
-    static func loadMigratingIfNeeded(using allItems: [PromptItem]) -> [String: PromptRule] {
-        var rules = load()
+    static func loadMigratingIfNeeded(using allItems: [PromptItem]?) -> [String: PromptRule]? {
+        guard var rules = load() else { return nil }
         guard !UserDefaults.standard.bool(forKey: migratedDefaultsKey) else { return rules }
+        // If the caller's own prompt data failed to load, `allItems` arrives empty for the
+        // wrong reason — skip migration this cycle (and leave the flag unset) rather than
+        // mark it "done" having migrated nothing, which would permanently strand legacy
+        // text-keyed rules the next time the caller's load actually succeeds.
+        guard let allItems else { return rules }
 
         var changed = false
         for item in allItems {
@@ -512,7 +517,10 @@ public enum PromptRulesStore {
         return rules
     }
 
-    public static func load() -> [String: PromptRule] {
+    /// Safe loader:
+    /// - Missing file → empty dict (first run — no rules saved yet).
+    /// - Decode failure → nil, so callers can avoid overwriting the file with empty/lost state.
+    public static func load() -> [String: PromptRule]? {
         do {
             if !FileManager.default.fileExists(atPath: fileURL.path) {
                 #if DEBUG
@@ -540,7 +548,7 @@ public enum PromptRulesStore {
             print("❌ PromptRulesStore load error: \(error)")
             print("   → File: \(fileURL.path)")
             #endif
-            return [:]
+            return nil
         }
     }
 

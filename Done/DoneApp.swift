@@ -157,8 +157,10 @@ private func loadAllPromptsFromDisk() -> [PromptItem] {
 // MARK: - One-off cleanup (delete prompts whose dated rule has passed)
 
 private func performOneOffCleanup() {
-    // Cheap early exit before touching prompts.json at all.
-    guard !PromptRulesStore.load().isEmpty else { return }
+    // Cheap early exit before touching prompts.json at all. Bail on load failure too —
+    // an empty result here could mean "no rules" or "decode failed", and treating a
+    // failure as "no rules" is safe (nothing gets deleted below).
+    guard let existingRules = PromptRulesStore.load(), !existingRules.isEmpty else { return }
 
     // CRITICAL: only proceed if prompts.json loads successfully.
     guard let state = PromptsStore.loadSafe() else {
@@ -166,7 +168,12 @@ private func performOneOffCleanup() {
         return
     }
 
-    var rules = PromptRulesStore.loadMigratingIfNeeded(using: state.allItems)
+    // CRITICAL: only proceed if prompt_rules.json loads successfully — otherwise the
+    // save below would overwrite it with a near-empty dict.
+    guard var rules = PromptRulesStore.loadMigratingIfNeeded(using: state.allItems) else {
+        print("🛑 OneOffCleanup: aborted because prompt_rules.json failed to load (preventing overwrite).")
+        return
+    }
 
     let now = Date()
     let toDeleteIDs = Set(rules.compactMap { key, rule -> UUID? in
@@ -203,7 +210,10 @@ private func performOneOffCleanup() {
 
 // MARK: - Daily summary helper
 
-private func doneTodayCount() -> Int {
+/// Not private: called wherever a prompt is marked done, so the 9pm summary notification's
+/// baked-in count can be refreshed rather than going stale from whatever it was when the app
+/// was last opened.
+func doneTodayCount() -> Int {
     PromptStatusStore.load()
         .filter { $0.action == .done && Calendar.current.isDateInToday($0.occurredAt) }
         .count

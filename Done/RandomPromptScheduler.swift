@@ -261,7 +261,7 @@ final class RandomPromptScheduler {
     ) {
         var history = history
 
-        let perPromptRules = PromptRulesStore.load()
+        let perPromptRules = PromptRulesStore.load() ?? [:]
 
         // Build set of prompt IDs already acted on today (done or skipped)
         let todayStart = cal.startOfDay(for: now)
@@ -323,6 +323,11 @@ final class RandomPromptScheduler {
                 candidates = allPrompts.filter { prompt in
                     let trimmed = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !trimmed.isEmpty else { return false }
+
+                    // Keep the same "already acted on today" exclusion as the primary
+                    // filter above — otherwise this fallback can re-offer a prompt just
+                    // marked done/skipped today.
+                    guard !actedOnToday.contains(prompt.id) else { return false }
 
                     guard let rule = perPromptRules[prompt.id.uuidString] else {
                         return true

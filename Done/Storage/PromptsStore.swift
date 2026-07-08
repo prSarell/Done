@@ -142,13 +142,13 @@ enum PromptsStore {
 
     /// Loads prompts and migrates any legacy text-keyed alert rules to id-based keys in one
     /// step, so every call site gets the rules migration for free instead of re-triggering it.
-    static func loadSafeWithRules() -> (state: PromptsState?, rules: [String: PromptRule]) {
+    static func loadSafeWithRules() -> (state: PromptsState?, rules: [String: PromptRule]?) {
         let state = loadSafe()
-        let rules = PromptRulesStore.loadMigratingIfNeeded(using: state?.allItems ?? [])
+        let rules = PromptRulesStore.loadMigratingIfNeeded(using: state?.allItems)
         return (state, rules)
     }
 
-    static func loadSafeWithRulesAsync() async -> (state: PromptsState?, rules: [String: PromptRule]) {
+    static func loadSafeWithRulesAsync() async -> (state: PromptsState?, rules: [String: PromptRule]?) {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .utility).async {
                 cont.resume(returning: loadSafeWithRules())

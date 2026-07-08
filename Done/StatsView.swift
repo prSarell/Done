@@ -302,7 +302,7 @@ struct StatsView: View {
                                 .overlay(alignment: .leading) {
                                     RoundedRectangle(cornerRadius: 3)
                                         .fill(Color.accentColor)
-                                        .frame(width: geo.size.width * CGFloat(item.totalSeconds) / CGFloat(all[0].totalSeconds))
+                                        .frame(width: geo.size.width * CGFloat(item.totalSeconds) / CGFloat(max(1, all[0].totalSeconds)))
                                 }
                         }
                         .frame(width: 80, height: 6)
@@ -409,6 +409,7 @@ struct StatsView: View {
 
         doneTodayPromptIDs.insert(item.id)
         NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
+        NotificationsManager.shared.scheduleDailySummary(doneCount: doneTodayCount())
         triggerReward()   // everything in this list is important by definition
 
         // Greys the prompt out for the rest of the day; one-off prompts are purged
@@ -430,7 +431,9 @@ struct StatsView: View {
     /// keep a live `@State` rules dict wired to autosave like PromptsView does, so this
     /// reads the freshest rules from disk, applies the change, and saves directly.
     private func persistRuleChange(for item: PromptItem, newRule: PromptRule?) {
-        var latestRules = PromptRulesStore.load()
+        // If this fresh read fails, don't save — that would overwrite prompt_rules.json
+        // with just this one change, losing every other rule on disk.
+        guard var latestRules = PromptRulesStore.load() else { return }
         latestRules[item.id.uuidString] = newRule
         PromptRulesStore.save(latestRules)
         loadImportantPrompts()
@@ -457,7 +460,8 @@ struct StatsView: View {
 
     private func loadImportantPrompts() {
         guard let state = PromptsStore.loadSafe() else { return }
-        let loadedRules = PromptRulesStore.loadMigratingIfNeeded(using: state.allItems)
+        // If rules fail to decode, keep whatever's already in memory rather than clobber it.
+        guard let loadedRules = PromptRulesStore.loadMigratingIfNeeded(using: state.allItems) else { return }
         rules = loadedRules
 
         let nonWork = state.dailyLists.allItems + state.weeklyLists.allItems + state.monthlyLists.allItems

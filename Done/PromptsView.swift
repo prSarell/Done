@@ -305,8 +305,18 @@ struct PromptsView: View {
                 mentalHealthLists = loadedState.mentalHealthLists
             }
             // else: decode failed — keep current in-memory state rather than clobber it
-            rules = loadedRules
-            repairCorruptedRules()
+            if let loadedRules {
+                rules = loadedRules
+                repairCorruptedRules()
+            }
+            // else: rules decode failed — keep current in-memory rules rather than clobber it
+
+            // Yield so SwiftUI processes the `rules`/list updates above (and their onChange
+            // handlers) while hasFinishedInitialLoad is still false. Without this, these
+            // synchronous state changes get coalesced with the flag flip below into the same
+            // update pass, and onChange(of: rules) observes the flag already true, defeating
+            // the gate and letting a load re-run resave over prompt_rules.json.
+            await Task.yield()
 
             hasFinishedInitialLoad = true
 
@@ -570,6 +580,7 @@ struct PromptsView: View {
         if action == .done {
             doneTodayPromptIDs.insert(item.id)
             NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
+            NotificationsManager.shared.scheduleDailySummary(doneCount: doneTodayCount())
             let rule = rules[item.id.uuidString]
             if rule?.isImportant == true {
                 triggerReward()
@@ -637,10 +648,10 @@ struct PromptsView: View {
             guard doneIDs.contains(item.id) else { return false }
             let rule = rules[item.id.uuidString]
             if rule?.oneOff == false { return false }  // explicitly marked repeat, keep it
-            switch rule?.recurrenceKind {
-            case nil, .none?, .oneOff: return true
-            default: return false  // keep repeating prompts in the list
-            }
+            // No rule, or a rule that doesn't structurally resolve to one-off, means this
+            // isn't a genuine one-off — keep it. Only an explicit/inferred .oneOff purges.
+            guard rule?.recurrenceKind == .oneOff else { return false }
+            return true
         }
 
         var removedIDs: [UUID] = []

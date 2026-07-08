@@ -35,7 +35,7 @@ final class RewardsViewModel: ObservableObject {
         "You're on a roll! 🌀", "That's what I'm talking about! ✨",
         "From little things big things can grow. 🐾", "Discipline looks good on you 👊",
         "One session closer 🎯", "Time is an illusion.", "Corks punch! You've done it!",
-        "They said you'd never make it, but you finaly came through!",
+        "They said you'd never make it, but you finally came through!",
         "Turns out you're pretty good at this.", "You did it.",
         "In a universe of infinite improbability, you smashed it. ♾️",
         "Tomorrow you'll thank yourself", "Legend 👑",

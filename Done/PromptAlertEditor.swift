@@ -96,13 +96,17 @@ final class PromptAlertEditorModel: ObservableObject {
     }
 
     func clearRule() {
-        onCommit?(nil)
+        // Clearing removes the schedule but must not lose the item's repeat/one-off
+        // identity — committing bare `nil` here previously made the item indistinguishable
+        // from a genuine one-off, so it got purged by purgeCompletedOneOffPrompts the next
+        // time it was marked done, even for ordinary recurring prompts.
+        onCommit?(PromptRule(oneOff: !repeats))
         isPresented = false
     }
 
     func save() {
         guard dayEnabled || dateEnabled || timeEnabled else {
-            onCommit?(nil)
+            onCommit?(PromptRule(oneOff: !repeats))
             isPresented = false
             return
         }
