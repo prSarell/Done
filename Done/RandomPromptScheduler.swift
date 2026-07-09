@@ -139,7 +139,12 @@ final class RandomPromptScheduler {
         // Scheduled/date-driven prompts are handled by their own scheduler. Wait for it to
         // fully settle before planning random ones, so we know the real "sched-*" pending
         // count and can size the random budget against it (see combinedNotificationCap).
-        ScheduledPromptScheduler.shared.refreshSchedule(prompts: allPrompts) { [weak self] in
+        ScheduledPromptScheduler.shared.refreshSchedule(
+            prompts: allPrompts,
+            categoryPromptIDs: categoryPromptIDs,
+            categoryQuietWindows: categoryQuietWindows,
+            globalRules: rules
+        ) { [weak self] in
             self?.continueRefreshAfterScheduledPlanning(
                 allPrompts: allPrompts,
                 categoryPromptIDs: categoryPromptIDs,

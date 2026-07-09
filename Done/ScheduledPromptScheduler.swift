@@ -41,6 +41,9 @@ final class ScheduledPromptScheduler {
     /// `sched-*` pending requests being in their final state by the time it's called.
     func refreshSchedule(
         prompts: [PromptItem],
+        categoryPromptIDs: [PromptCategory: Set<UUID>] = [:],
+        categoryQuietWindows: [PromptCategory: CategoryQuietWindow] = [:],
+        globalRules: RandomPromptRules = .init(),
         forceRebuild: Bool = true,
         calendar cal: Calendar = .current,
         onComplete: @escaping () -> Void = {}
@@ -155,7 +158,7 @@ final class ScheduledPromptScheduler {
                 print("SPS: '\(prompt.text)' target=\(target) | leadInStart=\(leadInStart) | horizon=\(horizon)")
                 #endif
 
-                let dates = self.generateFireDates(
+                let rawDates = self.generateFireDates(
                     for: prompt,
                     rule: rule,
                     target: target,
@@ -164,9 +167,21 @@ final class ScheduledPromptScheduler {
                     calendar: cal
                 )
 
+                let promptCategory = self.category(for: prompt.id, in: categoryPromptIDs)
+                let dates = rawDates.filter {
+                    !self.isQuietHour(
+                        $0,
+                        category: promptCategory,
+                        categoryQuietWindows: categoryQuietWindows,
+                        dayStartHour: globalRules.dayStartHour,
+                        dayEndHour: globalRules.dayEndHour,
+                        calendar: cal
+                    )
+                }
+
                 if dates.isEmpty {
                     #if DEBUG
-                    print("SPS: generated 0 notifications for '\(prompt.text)'")
+                    print("SPS: generated 0 notifications for '\(prompt.text)' (raw=\(rawDates.count), quiet-hours filtered=\(rawDates.count - dates.count))")
                     #endif
                 }
 
@@ -391,6 +406,40 @@ final class ScheduledPromptScheduler {
         events: [PromptActionEvent]
     ) -> Bool {
         events.contains { $0.promptID == promptID && $0.occurredAt >= cycleStart }
+    }
+
+    // MARK: - Quiet hours
+
+    private func category(
+        for promptID: UUID,
+        in categoryPromptIDs: [PromptCategory: Set<UUID>]
+    ) -> PromptCategory? {
+        categoryPromptIDs.first { $0.value.contains(promptID) }?.key
+    }
+
+    /// Mirrors the global + per-category quiet-hours enforcement `RandomPromptScheduler`
+    /// applies to random prompts (see `CategoryQuietWindow.isQuiet` and the `dayStartHour`/
+    /// `dayEndHour` clip in `RandomPromptScheduler.planNow`), so a dated/recurring prompt
+    /// can't slip a notification past the user's quiet-hours settings just because this
+    /// scheduler plans multiple days ahead instead of a single day's window.
+    private func isQuietHour(
+        _ date: Date,
+        category: PromptCategory?,
+        categoryQuietWindows: [PromptCategory: CategoryQuietWindow],
+        dayStartHour: Int,
+        dayEndHour: Int,
+        calendar cal: Calendar
+    ) -> Bool {
+        if let category, let window = categoryQuietWindows[category], window.isQuiet(at: date, cal: cal) {
+            return true
+        }
+
+        guard dayStartHour != dayEndHour else { return false }
+        let hour = cal.component(.hour, from: date)
+        let withinGlobalWindow = dayStartHour < dayEndHour
+            ? (hour >= dayStartHour && hour < dayEndHour)
+            : (hour >= dayStartHour || hour < dayEndHour)
+        return !withinGlobalWindow
     }
 
     // MARK: - Planning horizon
