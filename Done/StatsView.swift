@@ -147,7 +147,7 @@ struct StatsView: View {
                 Divider()
                 statCell(count: skippedCount, label: "Skipped", color: .secondary)
                 Divider()
-                statCell(count: doneCount + skippedCount, label: "Total", color: .accentColor)
+                statCell(count: importantCount, label: "Important", color: .yellow)
             }
         }
     }
@@ -744,6 +744,7 @@ struct StatsView: View {
 
     private var doneCount:    Int { filteredEvents.filter { $0.action == .done }.count }
     private var skippedCount: Int { filteredEvents.filter { $0.action == .skipped }.count }
+    private var importantCount: Int { filteredEvents.filter { rules[$0.promptID.uuidString]?.isImportant == true }.count }
 
     // MARK: - Stat cells
 
