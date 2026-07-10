@@ -575,8 +575,10 @@ struct PromptsView: View {
             }
         }
 
-        // Done greys the prompt out for the rest of the day; one-off prompts are then
-        // purged overnight (see purgeCompletedOneOffPrompts), repeating ones come back by design.
+        // Done greys the prompt out for the rest of the day. A dated/timed one-off then
+        // behaves like a repeating prompt — live again the next day — until its own date/time
+        // passes, at which point it's purged (see purgeCompletedOneOffPrompts). A bare one-off
+        // with no date/time is purged overnight instead, same as before.
         if action == .done {
             doneTodayPromptIDs.insert(item.id)
             NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
@@ -633,25 +635,32 @@ struct PromptsView: View {
 
     // MARK: - Done cleanup
 
-    /// Removes one-off prompts that were marked done on a previous day, so they stay greyed
-    /// out on the list for the rest of the day they were completed, then disappear overnight.
-    /// Called on launch and when the app returns to the foreground.
+    /// Removes expired one-off prompts. A one-off that carries its own date and/or time keeps
+    /// resetting daily like a repeating prompt (greyed out for the day it's marked done, live
+    /// again the next day) until that date/time actually passes — marking it done early must
+    /// never delete it ahead of the date it exists to protect. A bare one-off with no date/time
+    /// has nothing of its own to wait for, so it's purged once marked done on a prior day, as
+    /// before. Called on launch and when the app returns to the foreground.
     private func purgeCompletedOneOffPrompts() {
+        let now = Date()
         let doneIDs = Set(
             PromptStatusStore.load()
                 .filter { $0.action == .done && !Calendar.current.isDateInToday($0.occurredAt) }
                 .map { $0.promptID }
         )
-        guard !doneIDs.isEmpty else { return }
 
         let shouldRemove: (PromptItem) -> Bool = { [rules] item in
-            guard doneIDs.contains(item.id) else { return false }
-            let rule = rules[item.id.uuidString]
-            if rule?.oneOff == false { return false }  // explicitly marked repeat, keep it
+            guard let rule = rules[item.id.uuidString] else { return false }
+            if rule.oneOff == false { return false }  // explicitly marked repeat, keep it
             // No rule, or a rule that doesn't structurally resolve to one-off, means this
             // isn't a genuine one-off — keep it. Only an explicit/inferred .oneOff purges.
-            guard rule?.recurrenceKind == .oneOff else { return false }
-            return true
+            guard rule.recurrenceKind == .oneOff else { return false }
+
+            if rule.date != nil || rule.timeHour != nil || rule.timeMinute != nil {
+                return rule.shouldAutoDelete(after: now)
+            }
+
+            return doneIDs.contains(item.id)
         }
 
         var removedIDs: [UUID] = []
