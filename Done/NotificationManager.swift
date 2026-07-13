@@ -182,6 +182,32 @@ final class NotificationsManager {
         center.removeDeliveredNotifications(withIdentifiers: [id])
     }
 
+    /// Cancels only pending (not-yet-fired) requests for the given prefix, leaving any
+    /// already-delivered banners on the Lock Screen / Notification Center untouched. Use
+    /// this for routine rebuilds — cancelling a stale future request is safe, but silently
+    /// stripping a banner the user has already received is not.
+    func cancelPending(prefix: String, completion: (() -> Void)? = nil) {
+        let center = UNUserNotificationCenter.current()
+
+        center.getPendingNotificationRequests { requests in
+            let pendingIDs = requests
+                .map(\.identifier)
+                .filter { $0.hasPrefix(prefix) }
+
+            DispatchQueue.main.async {
+                if !pendingIDs.isEmpty {
+                    center.removePendingNotificationRequests(withIdentifiers: pendingIDs)
+                }
+
+                #if DEBUG
+                print("🔕 NotificationsManager: cancelled \(pendingIDs.count) pending for prefix '\(prefix)'")
+                #endif
+
+                completion?()
+            }
+        }
+    }
+
     func cancelAll(prefix: String, completion: (() -> Void)? = nil) {
         let center = UNUserNotificationCenter.current()
 

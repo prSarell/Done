@@ -106,9 +106,9 @@ final class ScheduledPromptScheduler {
         #endif
 
         guard !scheduledPrompts.isEmpty else {
-            NotificationsManager.shared.cancelAll(prefix: idPrefix) { [weak self] in
+            NotificationsManager.shared.cancelPending(prefix: idPrefix) { [weak self] in
                 #if DEBUG
-                print("SPS: no scheduled prompts found, cancelled all sched-* notifications")
+                print("SPS: no scheduled prompts found, cancelled all pending sched-* notifications")
                 #endif
                 self?.finishRefresh()
                 onComplete()
@@ -116,7 +116,7 @@ final class ScheduledPromptScheduler {
             return
         }
 
-        NotificationsManager.shared.cancelAll(prefix: idPrefix) { [weak self] in
+        NotificationsManager.shared.cancelPending(prefix: idPrefix) { [weak self] in
             guard let self else {
                 onComplete()
                 return
