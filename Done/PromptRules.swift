@@ -309,7 +309,10 @@ public extension PromptRule {
             return target
 
         case .weekly:
-            return cal.startOfDay(for: target)
+            // Start the lead-in immediately (not just on the target's own day) so a
+            // notification gets queued with iOS whenever the app happens to run this
+            // week, rather than depending on the app being open on the exact target day.
+            return cal.startOfDay(for: min(now, target))
 
         case .monthly, .fortnightly:
             return cal.date(byAdding: .day, value: -5, to: cal.startOfDay(for: target))
@@ -341,6 +344,14 @@ private extension PromptRule {
     func effectiveOneOffBaseDay(relativeTo now: Date, calendar cal: Calendar) -> Date {
         if let d = date {
             return d
+        }
+
+        if let wd = weekday {
+            let thisWeekTarget = targetForWeekday(wd, relativeTo: now, calendar: cal)
+            if thisWeekTarget >= now {
+                return thisWeekTarget
+            }
+            return cal.date(byAdding: .day, value: 7, to: thisWeekTarget) ?? thisWeekTarget
         }
 
         // Fallback for one-off + time but no explicit date:

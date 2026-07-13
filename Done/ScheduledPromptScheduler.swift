@@ -446,15 +446,17 @@ final class ScheduledPromptScheduler {
 
     /// How far ahead we're willing to actually schedule notifications for a prompt.
     /// Most recurrence kinds only plan the next 24h and rely on being re-run regularly
-    /// (app open/foreground) to roll the window forward day by day. Yearly prompts instead
-    /// get a horizon reaching all the way to their target (plus a short overdue buffer), so
-    /// the full 30-day lead-in ramp is queued up front and doesn't depend on the app being
-    /// reopened every day to keep showing up.
+    /// (app open/foreground) to roll the window forward day by day. Yearly and weekly
+    /// prompts instead get a horizon reaching all the way to their target (plus a short
+    /// overdue buffer), so the full lead-in ramp is queued up front and doesn't depend on
+    /// the app being reopened on the exact target day to keep showing up.
     private func horizon(for rule: PromptRule, target: Date, now: Date) -> Date {
-        guard rule.recurrenceKind == .yearly else {
+        switch rule.recurrenceKind {
+        case .yearly, .weekly:
+            return target.addingTimeInterval(24 * 3600)
+        default:
             return now.addingTimeInterval(horizonHours * 3600)
         }
-        return target.addingTimeInterval(24 * 3600)
     }
 
     // MARK: - Fire date generation
