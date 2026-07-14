@@ -125,6 +125,7 @@ final class NotificationsManager {
     func scheduleDailySummary(doneCount: Int) {
         let id = "daily-summary-\(Self.dateKey(for: Date()))"
         cancel(id: id)
+        guard !Self.isGlobalQuietHour(21) else { return }
 
         var comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
         comps.hour = 21
@@ -147,6 +148,7 @@ final class NotificationsManager {
         ) else { return }
         guard let cutoff = calendar.date(bySettingHour: 21, minute: 0, second: 0, of: dayStart) else { return }
         guard referenceDate >= cutoff else { return }
+        guard !Self.isGlobalQuietHour(8) else { return }
 
         let events = PromptStatusStore.load()
         let todayDoneEvents = events.filter {
@@ -174,6 +176,21 @@ final class NotificationsManager {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd"
         return df.string(from: date)
+    }
+
+    /// Mirrors the global quiet-hours window (`global_earliest_hour`/`global_latest_hour`)
+    /// enforced for prompt notifications in `RandomPromptScheduler`/`ScheduledPromptScheduler`.
+    /// The 9pm daily summary and 8am morning update are fixed-time notifications outside
+    /// those schedulers, so they need their own check against the same settings.
+    private static func isGlobalQuietHour(_ hour: Int) -> Bool {
+        let defaults = UserDefaults.standard
+        let start = defaults.integer(forKey: "global_earliest_hour")
+        let end = defaults.integer(forKey: "global_latest_hour")
+        guard start != end else { return false }
+        let withinAllowed = start < end
+            ? (hour >= start && hour < end)
+            : (hour >= start || hour < end)
+        return !withinAllowed
     }
 
     func cancel(id: String) {
