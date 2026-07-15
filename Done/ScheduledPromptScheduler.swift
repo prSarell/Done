@@ -525,7 +525,29 @@ final class ScheduledPromptScheduler {
             return overdueResults
         }
 
-        // Date/weekday-only prompts: use the rolling lead-in cadence.
+        // Weekday-only prompts (no explicit time), e.g. "Every Monday": unlike yearly/monthly
+        // lead-ins, the target is at most a week out, so a multi-day countdown ramp would fire
+        // on every day leading up to the target instead of just on the target weekday itself.
+        // Queue a single fire date anchored on the target day — this still gets queued with
+        // iOS as soon as the app is opened any day that week, but it only *fires* on target day.
+        if rule.recurrenceKind == .weekly {
+            let minimumFireDate = now.addingTimeInterval(immediateLeadSeconds)
+            let fireDate = max(target, minimumFireDate)
+
+            guard fireDate <= horizon else {
+                #if DEBUG
+                print("SPS: '\(prompt.text)' weekday-only target outside horizon, skipping")
+                #endif
+                return []
+            }
+
+            #if DEBUG
+            print("SPS: '\(prompt.text)' weekday-only fire date: \(fireDate)")
+            #endif
+            return [fireDate]
+        }
+
+        // Date-only prompts: use the rolling lead-in cadence.
         let leadInStart = rule.leadInStart(for: target, now: now, calendar: cal)
 
         // Not yet within the lead-in window — nothing to schedule. Most recurrence kinds
