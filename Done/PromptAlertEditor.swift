@@ -224,12 +224,16 @@ final class PromptAlertEditorModel: ObservableObject {
                 dateToShow = composed
             }
 
+            // A date always implies a specific weekday, so show it even if the user
+            // never touched the separate "Day" toggle (which is for weekly recurrence).
+            let dayName = weekdayName(for: cal.component(.weekday, from: dateToShow))
+            let dateStr = dfDate.string(from: dateToShow)
+
             if hasTime {
-                let dateStr = dfDate.string(from: dateToShow)
                 let timeStr = dfTime.string(from: dateToShow)
-                return "\(dateStr) \(timeStr)"
+                return "\(dayName), \(dateStr) \(timeStr)"
             } else {
-                return dfDate.string(from: dateToShow)
+                return "\(dayName), \(dateStr)"
             }
         }
 
