@@ -432,7 +432,8 @@ final class RandomPromptScheduler {
 
             let userInfo: [AnyHashable: Any] = [
                 PromptNotificationDelegate.kPromptID: next.id.uuidString,
-                PromptNotificationDelegate.kPromptText: next.text
+                PromptNotificationDelegate.kPromptText: next.text,
+                PromptNotificationDelegate.kPromptDate: time.timeIntervalSince1970
             ]
             let isImportant = perPromptRules[next.id.uuidString]?.isImportant == true
             NotificationsManager.shared.scheduleOneOff(

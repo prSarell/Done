@@ -21,6 +21,7 @@ final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelega
     // Keys in content.userInfo
     nonisolated static let kPromptID = "prompt_id"
     nonisolated static let kPromptText = "prompt_text"
+    nonisolated static let kPromptDate = "prompt_date"
 
     // Show banner while app open
     func userNotificationCenter(_ center: UNUserNotificationCenter,
@@ -53,8 +54,17 @@ final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelega
 
         guard let action else { return }
 
+        // Use the date the prompt was scheduled/delivered for, not "now" — otherwise
+        // acting on a stale banner from a previous day records it against today.
+        let occurredAt: Date
+        if let epoch = userInfo[Self.kPromptDate] as? Double {
+            occurredAt = Date(timeIntervalSince1970: epoch)
+        } else {
+            occurredAt = response.notification.date
+        }
+
         PromptStatusStore.append(
-            PromptActionEvent(promptID: promptID, promptText: promptText, action: action)
+            PromptActionEvent(promptID: promptID, promptText: promptText, action: action, occurredAt: occurredAt)
         )
 
         if action == .done {

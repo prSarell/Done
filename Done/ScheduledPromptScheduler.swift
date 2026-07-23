@@ -192,7 +192,8 @@ final class ScheduledPromptScheduler {
 
                     let userInfo: [AnyHashable: Any] = [
                         PromptNotificationDelegate.kPromptID: prompt.id.uuidString,
-                        PromptNotificationDelegate.kPromptText: prompt.text
+                        PromptNotificationDelegate.kPromptText: prompt.text,
+                        PromptNotificationDelegate.kPromptDate: fireDate.timeIntervalSince1970
                     ]
 
                     let title = rule.isImportant == true ? "⭐️ \(prompt.text)" : prompt.text
