@@ -97,6 +97,12 @@ public struct PromptRule: Codable, Equatable {
 
     // Should be auto-removed after the assigned date?
     public func shouldAutoDelete(after now: Date, calendar cal: Calendar = .current) -> Bool {
+        // An explicit "repeat" (oneOff == false) always wins, even when the rule's other
+        // fields (e.g. a bare time with no weekday) make `recurrenceKind` fall back to
+        // .oneOff — otherwise a repeating reminder with no weekday/date structure of its
+        // own gets silently purged ~24h after creation despite the user asking it to repeat.
+        guard oneOff != false else { return false }
+
         let treatAsOneOff = (oneOff == true) || (recurrenceKind == .oneOff)
         guard treatAsOneOff else { return false }
 

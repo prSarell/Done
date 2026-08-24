@@ -164,7 +164,8 @@ final class ScheduledPromptScheduler {
                     target: target,
                     now: now,
                     horizon: horizon,
-                    calendar: cal
+                    calendar: cal,
+                    dayStartHour: globalRules.dayStartHour
                 )
 
                 let promptCategory = self.category(for: prompt.id, in: categoryPromptIDs)
@@ -468,7 +469,8 @@ final class ScheduledPromptScheduler {
         target: Date,
         now: Date,
         horizon: Date,
-        calendar cal: Calendar
+        calendar cal: Calendar,
+        dayStartHour: Int
     ) -> [Date] {
         // Time-specific prompts: fire twice in the 30 min before and twice in the 30 min after.
         // Marking done/skip from any notification cancels the rest (handled by the delegate).
@@ -533,7 +535,16 @@ final class ScheduledPromptScheduler {
         // iOS as soon as the app is opened any day that week, but it only *fires* on target day.
         if rule.recurrenceKind == .weekly {
             let minimumFireDate = now.addingTimeInterval(immediateLeadSeconds)
-            let fireDate = max(target, minimumFireDate)
+
+            // `target` here is end-of-day (see `PromptRule.targetDate`'s no-time fallback) —
+            // a placeholder for date-math purposes, not a time anyone wants a notification
+            // at. The global quiet-hours window can never include 23:59 (its latest
+            // selectable hour is 23, checked with `<`), so firing at raw `target` gets
+            // silently dropped by `isQuietHour` every single week. Anchor the real push to
+            // the day's earliest-reminder hour instead so a day-only weekly prompt (e.g.
+            // "every Wednesday", no time) actually reaches the user.
+            let anchoredTarget = cal.date(bySettingHour: dayStartHour, minute: 0, second: 0, of: target) ?? target
+            let fireDate = max(anchoredTarget, minimumFireDate)
 
             guard fireDate <= horizon else {
                 #if DEBUG
