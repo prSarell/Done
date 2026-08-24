@@ -395,33 +395,57 @@ final class RandomPromptScheduler {
             return
         }
 
-        // Deterministic pool shuffle — important prompts are duplicated to weight them higher
+        // Deterministic seed for this day's shuffles/picks
         let seedInt = todayKey.hashValue ^ candidates.count
         let seed = UInt64(bitPattern: Int64(seedInt))
         var rng = SeededRandom(seed: seed)
-        var pool: [PromptItem] = []
-        for prompt in candidates {
-            let weight = perPromptRules[prompt.id.uuidString]?.isImportant == true ? rules.weightImportant : 1
-            for _ in 0..<weight { pool.append(prompt) }
+
+        // Reverse-lookup so each candidate knows which category it belongs to.
+        var promptCategory: [UUID: PromptCategory] = [:]
+        for (category, ids) in categoryPromptIDs {
+            for id in ids { promptCategory[id] = category }
         }
-        pool.shuffle(using: &rng)
+
+        // Weighted pool per category — "important" prompts are duplicated to weight
+        // them higher *within their own category* (see `RotationKey`/`CategoryRotation`
+        // below for why this is no longer a single combined pool: a flat draw let a
+        // category with more prompts, or more prompts starred important, crowd out a
+        // smaller/less-starred category like Health over time, even with nothing
+        // misconfigured).
+        var categoryPools: [RotationKey: [PromptItem]] = [:]
+        for prompt in candidates {
+            let key: RotationKey = promptCategory[prompt.id].map(RotationKey.category) ?? .other
+            let weight = perPromptRules[prompt.id.uuidString]?.isImportant == true ? rules.weightImportant : 1
+            categoryPools[key, default: []].append(contentsOf: Array(repeating: prompt, count: weight))
+        }
+        for key in categoryPools.keys {
+            categoryPools[key]?.shuffle(using: &rng)
+        }
+
+        var rotation = CategoryRotation(categories: Array(categoryPools.keys), rng: &rng)
 
         var scheduledIDs: [String] = []
         var lastText = history.lastText
         var scheduledCount = 0
 
         for (i, time) in times.enumerated() {
-            var eligible = PromptSelector.eligible(from: pool, rules: perPromptRules, at: time, cal: cal)
-
-            // Suppress prompts from any category currently inside its quiet window
-            // (e.g. Work defaults to quiet outside Mon–Fri 9am–5pm).
-            for (category, ids) in categoryPromptIDs where !ids.isEmpty {
-                if let window = categoryQuietWindows[category], window.isQuiet(at: time, cal: cal) {
-                    eligible = eligible.filter { !ids.contains($0.id) }
+            // Categories currently inside their quiet window (e.g. Work defaults to
+            // quiet outside Mon–Fri 9am–5pm) are suppressed entirely for this slot;
+            // everything else is narrowed to prompts whose per-prompt rule is active now.
+            var eligibleByCategory: [RotationKey: [PromptItem]] = [:]
+            for (key, items) in categoryPools {
+                if case .category(let category) = key,
+                   let window = categoryQuietWindows[category],
+                   window.isQuiet(at: time, cal: cal) {
+                    continue
                 }
+                let active = PromptSelector.eligible(from: items, rules: perPromptRules, at: time, cal: cal)
+                if !active.isEmpty { eligibleByCategory[key] = active }
             }
 
-            guard let next = pickNextPrompt(fromEligible: eligible, lastText: lastText, rng: &rng) else {
+            guard !eligibleByCategory.isEmpty,
+                  let chosenCategory = rotation.next(eligible: Set(eligibleByCategory.keys), rng: &rng),
+                  let next = pickNextPrompt(fromEligible: eligibleByCategory[chosenCategory] ?? [], lastText: lastText, rng: &rng) else {
                 continue
             }
 
@@ -570,6 +594,68 @@ final class RandomPromptScheduler {
         let elapsed = date.timeIntervalSince(startOfDay)
         let nextBucket = ceil(elapsed / step) * step
         return startOfDay.addingTimeInterval(nextBucket)
+    }
+}
+
+/// Groups a candidate prompt for round-robin purposes. `.other` is a defensive bucket
+/// for a prompt that isn't in any category's ID set (shouldn't happen given how
+/// `categoryPromptIDs` is built from the real prompt lists, but keeps such a prompt
+/// from being silently dropped rather than crowding out a real category).
+enum RotationKey: Hashable {
+    case category(PromptCategory)
+    case other
+}
+
+/// Round-robins through prompt categories so a single day's plan can't drift toward
+/// favoring one category over another the way a flat weighted draw across all
+/// candidates can (a category with more prompts, or more prompts starred important,
+/// wins more of a shared random draw purely by size). Each full pass through
+/// `serveOrder` offers every category at most one slot; `next(eligible:)` skips a
+/// category that's temporarily ineligible (e.g. inside its quiet window) without
+/// losing its place in line — everyone else still gets exactly one turn per cycle.
+struct CategoryRotation {
+    private var serveOrder: [RotationKey]
+    private var index = 0
+    private var lastServed: RotationKey?
+
+    init(categories: [RotationKey], rng: inout SeededRandom) {
+        serveOrder = categories.shuffled(using: &rng)
+    }
+
+    /// Returns the next category to serve given which categories currently have
+    /// eligible prompts, or nil if none of them do right now. Advances the rotation.
+    mutating func next(eligible eligibleCategories: Set<RotationKey>, rng: inout SeededRandom) -> RotationKey? {
+        guard !serveOrder.isEmpty else { return nil }
+
+        // Reshuffle only at a cycle boundary, and only once, before searching — never
+        // mid-sweep. Mutating serveOrder while walking it could make the sweep below
+        // land on the same element twice and never reach one it hasn't tried yet,
+        // wrongly reporting no eligible category even though one was still waiting.
+        if index == 0 {
+            reshuffleForNewCycle(rng: &rng)
+        }
+
+        // Walk a fixed snapshot of serveOrder for this search, so every offset maps
+        // to a distinct position — guaranteeing all categories are tried once each.
+        for offset in 0..<serveOrder.count {
+            let candidate = serveOrder[(index + offset) % serveOrder.count]
+            if eligibleCategories.contains(candidate) {
+                index = (index + offset + 1) % serveOrder.count
+                lastServed = candidate
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private mutating func reshuffleForNewCycle(rng: inout SeededRandom) {
+        guard serveOrder.count > 1 else { return }
+        serveOrder.shuffle(using: &rng)
+        // Avoid immediately re-serving the category that just closed the previous
+        // cycle if the fresh shuffle happens to put it first again.
+        if serveOrder.first == lastServed {
+            serveOrder.swapAt(0, Int.random(in: 1..<serveOrder.count, using: &rng))
+        }
     }
 }
 
