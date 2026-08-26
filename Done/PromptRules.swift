@@ -360,6 +360,26 @@ private extension PromptRule {
             return cal.date(byAdding: .day, value: 7, to: thisWeekTarget) ?? thisWeekTarget
         }
 
+        // Fallback for a repeating "every day at HH:MM" reminder (time set, no date/weekday,
+        // oneOff == false): treat it as scheduled for today, unless today's occurrence plus
+        // its ~30 min catch-up window (the ±30/±15 min candidates generated in
+        // ScheduledPromptScheduler.generateFireDates) has already passed. Without this
+        // roll-forward, a daily reminder that's not caught within that narrow window (e.g.
+        // the app isn't opened between 6:30-7:30 for a 7:00 reminder) would keep re-targeting
+        // today's unrecoverable slot on every later refresh and never fire again until the
+        // next calendar day happens to line up — going dark for the whole day with no catch-up,
+        // since self-rolling reminders intentionally skip the overdue catch-up path (see the
+        // isSelfRollingDailyReminder comment there). Rolling forward here queues tomorrow's
+        // occurrence with iOS as soon as any refresh runs, mirroring how weekly reminders
+        // already queue their next occurrence immediately once the current one passes.
+        if let h = timeHour, let m = timeMinute, oneOff == false {
+            let todayTarget = cal.date(bySettingHour: h, minute: m, second: 0, of: now) ?? now
+            let recoveryCutoff = todayTarget.addingTimeInterval(30 * 60)
+            if now > recoveryCutoff {
+                return cal.date(byAdding: .day, value: 1, to: now) ?? now
+            }
+        }
+
         // Fallback for one-off + time but no explicit date:
         // treat it as scheduled for today.
         return now
