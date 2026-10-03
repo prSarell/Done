@@ -120,8 +120,9 @@ final class RandomPromptScheduler {
 
     /// iOS silently drops pending local notifications once an app's total exceeds ~64.
     /// Scheduled/dated prompts (see `ScheduledPromptScheduler`) get first claim on that
-    /// budget since they're time-specific; random prompts only fill what's left, keeping
-    /// the combined total safely under the OS cap.
+    /// budget since they're time-specific, but are capped at
+    /// `ScheduledPromptScheduler.scheduledNotificationCap` so random prompts are always
+    /// left at least the difference, keeping the combined total safely under the OS cap.
     private static let combinedNotificationCap = 60
 
     /// Call on app launch / when prompts change. Plans *today’s* notifications once.
@@ -369,24 +370,22 @@ final class RandomPromptScheduler {
         }
 
         let start = max(start0, now)
-        let end = end0 <= start ? start.addingTimeInterval(3600) : end0
+        // Opened after the "latest" hour: nothing left to plan today. (Previously this
+        // stretched the window an hour past `now`, firing prompts after quiet time began.)
+        let end = end0
 
-        // Generate slots from "next slot after now" up to end, capped at 64, then further
-        // capped by randomBudget so combined with ScheduledPromptScheduler's own pending
-        // requests we stay safely under iOS's ~64 pending-notification ceiling.
-        let generatedTimes = Self.generateEveryInterval(
-            start: start,
-            end: end,
-            intervalMinutes: rules.intervalMinutes,
-            jitterMinutes: rules.jitterMinutes
-        )
-        let times = Array(generatedTimes.prefix(randomBudget))
-
-        #if DEBUG
-        if times.count < generatedTimes.count {
-            print("RPS: trimmed \(generatedTimes.count) candidate slots down to \(times.count) to respect randomBudget=\(randomBudget)")
-        }
-        #endif
+        // Slots from "next slot after now" up to end, spread to fit randomBudget so,
+        // combined with ScheduledPromptScheduler's own pending requests, we stay safely
+        // under iOS's ~64 pending-notification ceiling without bunching into the morning.
+        let times = end > start
+            ? Self.planSlotTimes(
+                start: start,
+                end: end,
+                intervalMinutes: rules.intervalMinutes,
+                jitterMinutes: rules.jitterMinutes,
+                budget: randomBudget
+            )
+            : []
 
         guard !times.isEmpty else {
             history.lastPlanDate = todayKey
@@ -554,6 +553,38 @@ final class RandomPromptScheduler {
     }
 
     // MARK: - Time generation (every N minutes, jittered, cap 64)
+
+    /// Slot times for today's random prompts, never more than `budget`. When the
+    /// requested cadence would need more slots than the budget allows, the interval is
+    /// widened so the budget is spread across the whole window — rather than keeping
+    /// the earliest slots and leaving the rest of the day silent.
+    static func planSlotTimes(
+        start: Date,
+        end: Date,
+        intervalMinutes: Int,
+        jitterMinutes: Int,
+        budget: Int
+    ) -> [Date] {
+        guard budget > 0, end > start else { return [] }
+
+        let windowMinutes = end.timeIntervalSince(start) / 60
+        let spreadMinutes = Int((windowMinutes / Double(budget)).rounded(.up))
+        let effectiveInterval = max(intervalMinutes, spreadMinutes)
+
+        #if DEBUG
+        if effectiveInterval > intervalMinutes {
+            print("RPS: widened interval \(intervalMinutes)m -> \(effectiveInterval)m to fit randomBudget=\(budget)")
+        }
+        #endif
+
+        let times = generateEveryInterval(
+            start: start,
+            end: end,
+            intervalMinutes: effectiveInterval,
+            jitterMinutes: jitterMinutes
+        )
+        return Array(times.prefix(budget))
+    }
 
     private static func generateEveryInterval(
         start: Date,

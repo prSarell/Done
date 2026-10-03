@@ -5,6 +5,7 @@
 //  Created by Patrick Sarell on 9/8/2025.
 //
 
+import Foundation
 import Testing
 @testable import Done
 
@@ -82,6 +83,54 @@ struct DoneTests {
         var rng = SeededRandom(seed: 1)
         var rotation = CategoryRotation(categories: [.category(.daily), .category(.mentalHealth)], rng: &rng)
         #expect(rotation.next(eligible: [], rng: &rng) == nil)
+    }
+
+    // MARK: - Random slot budget
+    //
+    // These guard the fix for the random feed going silent for weeks: scheduled
+    // reminders (daily meds × 4 nudges, birthday lead-ins) filled all 60 pending
+    // notification slots, leaving random prompts a budget of 0. Scheduled prompts are
+    // now capped lower, and whatever budget random prompts get is spread across the day.
+
+    @Test func scheduledCapAlwaysLeavesRoomForRandomPrompts() {
+        #expect(ScheduledPromptScheduler.scheduledNotificationCap <= 40)
+    }
+
+    private func todayAt(_ hour: Int) -> Date {
+        Calendar.current.date(bySettingHour: hour, minute: 0, second: 0, of: Date())!
+    }
+
+    @Test func slotsSpreadAcrossWholeDayWhenBudgetIsTight() {
+        let start = todayAt(7), end = todayAt(22)
+        let times = RandomPromptScheduler.planSlotTimes(
+            start: start, end: end, intervalMinutes: 21, jitterMinutes: 2, budget: 20
+        )
+
+        #expect(times.count <= 20)
+        #expect(times.count >= 18)
+        #expect(times.allSatisfy { $0 >= start && $0 <= end })
+        // Must still reach into the evening, not bunch up in the morning.
+        #expect(times.last! >= todayAt(20))
+    }
+
+    @Test func slotsKeepRequestedCadenceWhenBudgetIsAmple() {
+        let start = todayAt(7), end = todayAt(22)
+        let times = RandomPromptScheduler.planSlotTimes(
+            start: start, end: end, intervalMinutes: 21, jitterMinutes: 0, budget: 60
+        )
+        // 15h at 21m ≈ 42-43 slots — the budget doesn't force any widening.
+        #expect(times.count >= 42)
+        #expect(times.count <= 60)
+    }
+
+    @Test func noSlotsWithZeroBudgetOrEmptyWindow() {
+        let start = todayAt(7), end = todayAt(22)
+        #expect(RandomPromptScheduler.planSlotTimes(
+            start: start, end: end, intervalMinutes: 21, jitterMinutes: 2, budget: 0
+        ).isEmpty)
+        #expect(RandomPromptScheduler.planSlotTimes(
+            start: end, end: start, intervalMinutes: 21, jitterMinutes: 2, budget: 20
+        ).isEmpty)
     }
 
 }

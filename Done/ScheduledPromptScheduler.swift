@@ -16,7 +16,14 @@ final class ScheduledPromptScheduler {
     private let horizonHours: Double = 24
     private let maxNotificationsPerPrompt: Int = 6
     private let overdueInterval: TimeInterval = 60 * 60 * 3   // 3 hours
-    private let globalNotificationCap: Int = 60               // stay safely under iOS 64 cap
+    // iOS keeps at most ~64 pending notifications per app, shared with RandomPromptScheduler
+    // (which gets whatever this leaves under its combined cap of 60). Capped well below 60 so
+    // scheduled prompts can't take the whole budget: 15 daily set-time reminders × 4 nudges
+    // each, plus a birthday's 30-day lead-in ramp, used to fill all 60 by themselves and
+    // starve the random feed (and every unscheduled category, e.g. Mindfulness) for weeks.
+    // Soonest fires are kept; anything trimmed is re-queued on the next app open.
+    static let scheduledNotificationCap: Int = 40
+    private let globalNotificationCap: Int = ScheduledPromptScheduler.scheduledNotificationCap
     private let idPrefix = "sched-"
 
     // Yearly prompts (birthdays, anniversaries, etc.) get a much longer runway than other
