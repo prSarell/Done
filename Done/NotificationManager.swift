@@ -82,7 +82,8 @@ final class NotificationsManager {
         at date: Date,
         subtitle: String? = nil,
         userInfo: [AnyHashable: Any]? = nil,
-        categoryID: String? = nil
+        categoryID: String? = nil,
+        threadID: String? = nil
     ) {
         let comps = Calendar.current.dateComponents(
             [.year, .month, .day, .hour, .minute, .second],
@@ -100,6 +101,13 @@ final class NotificationsManager {
 
         if let categoryID {
             content.categoryIdentifier = categoryID
+        }
+
+        // Group every reminder for the same prompt into one Lock Screen stack, so the
+        // repeated nudges for a prompt don't each take up their own row. Defaults to the
+        // prompt's id when the caller passes prompt metadata.
+        if let thread = threadID ?? (userInfo?[PromptNotificationDelegate.kPromptID] as? String) {
+            content.threadIdentifier = thread
         }
 
         let trigger = UNCalendarNotificationTrigger(
@@ -191,6 +199,44 @@ final class NotificationsManager {
             ? (hour >= start && hour < end)
             : (hour >= start || hour < end)
         return !withinAllowed
+    }
+
+    /// Removes older delivered banners for any prompt that has more than one sitting on the
+    /// Lock Screen / Notification Center, keeping only the newest (which still carries the
+    /// Done/Skip actions). iOS gives no hook when a local notification is delivered while the
+    /// app isn't running, so this runs whenever the app gets a chance (foreground, or a
+    /// banner arriving while open) — `threadIdentifier` keeps them stacked in between.
+    func collapseDeliveredDuplicates() {
+        let center = UNUserNotificationCenter.current()
+        center.getDeliveredNotifications { delivered in
+            let stale = Self.staleDuplicateIDs(in: delivered.map {
+                (id: $0.request.identifier, promptKey: Self.promptKey(for: $0), date: $0.date)
+            })
+            guard !stale.isEmpty else { return }
+
+            DispatchQueue.main.async {
+                center.removeDeliveredNotifications(withIdentifiers: stale)
+                #if DEBUG
+                print("🧹 NotificationsManager: collapsed \(stale.count) duplicate delivered banner(s)")
+                #endif
+            }
+        }
+    }
+
+    /// Ids of every delivered banner except the newest one per prompt. Banners with no
+    /// prompt key (daily summary, morning update) are never touched.
+    static func staleDuplicateIDs(in delivered: [(id: String, promptKey: String?, date: Date)]) -> [String] {
+        Dictionary(grouping: delivered.filter { $0.promptKey != nil }, by: { $0.promptKey! })
+            .values
+            .flatMap { group in
+                group.sorted { $0.date > $1.date }.dropFirst().map(\.id)
+            }
+    }
+
+    private static func promptKey(for notification: UNNotification) -> String? {
+        let content = notification.request.content
+        if let id = content.userInfo[PromptNotificationDelegate.kPromptID] as? String { return id }
+        return content.threadIdentifier.isEmpty ? nil : content.threadIdentifier
     }
 
     func cancel(id: String) {

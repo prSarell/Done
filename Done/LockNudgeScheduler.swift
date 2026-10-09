@@ -47,7 +47,7 @@ final class LockNudgeScheduler {
             // Schedule fresh nudge
             let fire = now.addingTimeInterval(self.delaySeconds)
             let id = "lock-nudge-\(UUID().uuidString.prefix(6))"
-            NotificationsManager.shared.scheduleOneOff(id: id, title: prompt.text, at: fire)
+            NotificationsManager.shared.scheduleOneOff(id: id, title: prompt.text, at: fire, threadID: prompt.id.uuidString)
 
             #if DEBUG
             print("LockNudge: scheduled '\(prompt.text)' at \(fire)")

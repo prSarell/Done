@@ -214,4 +214,19 @@ struct DoneTests {
         #expect(thinned.last == dates.last)
     }
 
+    // MARK: - Lock Screen duplicate banners
+
+    @Test func collapseKeepsOnlyNewestBannerPerPrompt() {
+        let t0 = Date()
+        let delivered: [(id: String, promptKey: String?, date: Date)] = [
+            ("poo-1", "poo", t0),
+            ("poo-2", "poo", t0.addingTimeInterval(600)),
+            ("poo-3", "poo", t0.addingTimeInterval(1200)),
+            ("bins-1", "bins", t0),
+            ("summary", nil, t0),
+        ]
+        let stale = Set(NotificationsManager.staleDuplicateIDs(in: delivered))
+        #expect(stale == ["poo-1", "poo-2"])
+    }
+
 }

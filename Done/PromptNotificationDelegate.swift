@@ -26,7 +26,12 @@ final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelega
     // Show banner while app open
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        // The new banner isn't in the delivered list until after this returns, so collapse
+        // shortly afterwards to clear the older copies it replaces.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            NotificationsManager.shared.collapseDeliveredDuplicates()
+        }
+        return [.banner, .sound]
     }
 
     // Handle Done/Skip action taps

@@ -82,6 +82,8 @@ struct DoneApp: App {
                 }
                 // When app becomes active again later, allow a re-plan (once)
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                    NotificationsManager.shared.collapseDeliveredDuplicates()
+
                     if !didPlanThisForeground {
                         didPlanThisForeground = true
 
