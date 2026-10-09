@@ -166,6 +166,16 @@ public extension PromptRule {
         recurrenceKind != .none
     }
 
+    /// Prompts tied to a calendar date (birthdays, monthly bills, fortnightly bin night,
+    /// a dated one-off) that should remind across the days leading up to it, not just on it.
+    var hasDatedLeadIn: Bool {
+        switch recurrenceKind {
+        case .yearly, .monthly, .fortnightly: return true
+        case .oneOff: return date != nil
+        case .weekly, .none: return false
+        }
+    }
+
     var scheduleDescription: String {
         let cal = Calendar.current
         let now = Date()

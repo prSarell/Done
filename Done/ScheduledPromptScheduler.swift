@@ -172,7 +172,8 @@ final class ScheduledPromptScheduler {
                     now: now,
                     horizon: horizon,
                     calendar: cal,
-                    dayStartHour: globalRules.dayStartHour
+                    dayStartHour: globalRules.dayStartHour,
+                    dayEndHour: globalRules.dayEndHour
                 )
 
                 let promptCategory = self.category(for: prompt.id, in: categoryPromptIDs)
@@ -459,25 +460,29 @@ final class ScheduledPromptScheduler {
     /// prompts instead get a horizon reaching all the way to their target (plus a short
     /// overdue buffer), so the full lead-in ramp is queued up front and doesn't depend on
     /// the app being reopened on the exact target day to keep showing up.
-    private func horizon(for rule: PromptRule, target: Date, now: Date) -> Date {
-        switch rule.recurrenceKind {
-        case .yearly, .weekly:
+    ///
+    /// Monthly, fortnightly and dated one-off prompts used to get only the 24h horizon,
+    /// so their lead-in reminders (and the target day itself) only reached iOS if the app
+    /// happened to be opened within the 24h before each fire — e.g. a fortnightly bin
+    /// night stayed silent whenever the app wasn't opened the day before.
+    func horizon(for rule: PromptRule, target: Date, now: Date) -> Date {
+        if rule.hasDatedLeadIn || rule.recurrenceKind == .weekly {
             return target.addingTimeInterval(24 * 3600)
-        default:
-            return now.addingTimeInterval(horizonHours * 3600)
         }
+        return now.addingTimeInterval(horizonHours * 3600)
     }
 
     // MARK: - Fire date generation
 
-    private func generateFireDates(
+    func generateFireDates(
         for prompt: PromptItem,
         rule: PromptRule,
         target: Date,
         now: Date,
         horizon: Date,
         calendar cal: Calendar,
-        dayStartHour: Int
+        dayStartHour: Int,
+        dayEndHour: Int
     ) -> [Date] {
         // Time-specific prompts: fire twice in the 30 min before and twice in the 30 min after.
         // Marking done/skip from any notification cancels the rest (handled by the delegate).
@@ -489,7 +494,28 @@ final class ScheduledPromptScheduler {
                 target.addingTimeInterval(15 * 60),
                 target.addingTimeInterval(30 * 60)
             ]
-            let results = candidates.filter { $0 >= minimumFireDate && $0 <= horizon }
+            let dayOfResults = candidates.filter { $0 >= minimumFireDate && $0 <= horizon }
+
+            // Dated prompts with a time (a birthday at 9am, bin night at 7pm) used to get
+            // only these four nudges on the day itself — the lead-in ramp below was skipped
+            // entirely because it lives in the date-only branch. Add one reminder per day
+            // across the lead-in window so the run-up isn't silent.
+            let cap = rule.recurrenceKind == .yearly ? maxNotificationsPerYearlyPrompt : maxNotificationsPerPrompt
+            var results = dayOfResults
+            if rule.hasDatedLeadIn {
+                let leadIn = leadInDailyFireDates(
+                    rule: rule,
+                    target: target,
+                    now: now,
+                    minimumFireDate: minimumFireDate,
+                    calendar: cal,
+                    dayStartHour: dayStartHour,
+                    dayEndHour: dayEndHour
+                )
+                // Keep the days closest to the target when the cap bites.
+                let room = max(0, cap - dayOfResults.count)
+                results = Array(leadIn.suffix(room)) + dayOfResults
+            }
 
             if !results.isEmpty {
                 #if DEBUG
@@ -521,7 +547,6 @@ final class ScheduledPromptScheduler {
                 return []
             }
 
-            let cap = rule.recurrenceKind == .yearly ? maxNotificationsPerYearlyPrompt : maxNotificationsPerPrompt
             var overdueResults: [Date] = []
             var cursor = minimumFireDate
             while cursor < horizon && overdueResults.count < cap {
@@ -593,6 +618,10 @@ final class ScheduledPromptScheduler {
         }
 
         let cap = rule.recurrenceKind == .yearly ? maxNotificationsPerYearlyPrompt : maxNotificationsPerPrompt
+        // Generate the full ramp, then thin it to `cap` below. Stopping at `cap` while
+        // generating (as this used to) bunches every fire at the start of the lead-in now
+        // that monthly/fortnightly horizons reach the target, leaving the day itself empty.
+        let generationLimit = 500
 
         var results: [Date] = []
         let minimumFireDate = now.addingTimeInterval(immediateLeadSeconds)
@@ -611,7 +640,7 @@ final class ScheduledPromptScheduler {
 
         var cursor = results.last ?? start
 
-        while cursor < horizon && results.count < cap {
+        while cursor < horizon && results.count < generationLimit {
             let baseInterval = cadence(for: cursor, target: target, recurrenceKind: rule.recurrenceKind)
             let jittered = jitteredInterval(from: baseInterval)
 
@@ -637,6 +666,8 @@ final class ScheduledPromptScheduler {
             cursor = next
         }
 
+        results = evenlyThinned(results, to: cap)
+
         #if DEBUG
         if results.isEmpty {
             print("SPS: '\(prompt.text)' -> generated no fire dates")
@@ -648,6 +679,55 @@ final class ScheduledPromptScheduler {
         #endif
 
         return results
+    }
+
+    /// One reminder per day from the lead-in start up to the day before `target`, at the
+    /// prompt's own time — or at `dayStartHour` when that time falls outside the global
+    /// reminder window, so a 9pm bin night still gets its run-up instead of every lead-in
+    /// fire being dropped by the quiet-hours filter.
+    private func leadInDailyFireDates(
+        rule: PromptRule,
+        target: Date,
+        now: Date,
+        minimumFireDate: Date,
+        calendar cal: Calendar,
+        dayStartHour: Int,
+        dayEndHour: Int
+    ) -> [Date] {
+        guard let h = rule.timeHour, let m = rule.timeMinute else { return [] }
+
+        let withinWindow: Bool
+        if dayStartHour == dayEndHour {
+            withinWindow = true
+        } else if dayStartHour < dayEndHour {
+            withinWindow = h >= dayStartHour && h < dayEndHour
+        } else {
+            withinWindow = h >= dayStartHour || h < dayEndHour
+        }
+        let (fireHour, fireMinute) = withinWindow ? (h, m) : (dayStartHour, 0)
+
+        let targetDay = cal.startOfDay(for: target)
+        var day = cal.startOfDay(for: max(now, rule.leadInStart(for: target, now: now, calendar: cal)))
+        var results: [Date] = []
+
+        while day < targetDay {
+            if let fire = cal.date(bySettingHour: fireHour, minute: fireMinute, second: 0, of: day),
+               fire >= minimumFireDate {
+                results.append(fire)
+            }
+            guard let nextDay = cal.date(byAdding: .day, value: 1, to: day) else { break }
+            day = nextDay
+        }
+        return results
+    }
+
+    /// Picks `cap` dates spread evenly across `dates`, always keeping the first and last,
+    /// so a long lead-in keeps reminders right up to the target instead of front-loading.
+    func evenlyThinned(_ dates: [Date], to cap: Int) -> [Date] {
+        guard dates.count > cap else { return dates }
+        guard cap > 1 else { return Array(dates.suffix(max(cap, 0))) }
+        let step = Double(dates.count - 1) / Double(cap - 1)
+        return (0..<cap).map { dates[Int((Double($0) * step).rounded())] }
     }
 
     private func cadence(for date: Date, target: Date, recurrenceKind: PromptRecurrenceKind) -> TimeInterval {

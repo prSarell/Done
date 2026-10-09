@@ -133,4 +133,85 @@ struct DoneTests {
         ).isEmpty)
     }
 
+    // MARK: - Lead-in for dated prompts
+    //
+    // These guard the fix for birthdays/bin night going silent until the day itself:
+    // a dated prompt *with a time* skipped the lead-in ramp entirely, and monthly/
+    // fortnightly prompts only planned 24h ahead, so nothing reached iOS unless the
+    // app was opened the day before.
+
+    private func day(_ offset: Int, at hour: Int, from base: Date) -> Date {
+        let cal = Calendar.current
+        let d = cal.date(byAdding: .day, value: offset, to: base)!
+        return cal.date(bySettingHour: hour, minute: 0, second: 0, of: d)!
+    }
+
+    @Test func yearlyPromptWithTimeRemindsBeforeTheDay() {
+        let cal = Calendar.current
+        let now = todayAt(10)
+        let birthday = day(14, at: 0, from: now)
+        let comps = cal.dateComponents([.month, .day], from: birthday)
+        let rule = PromptRule(timeHour: 9, timeMinute: 0, oneOff: false, month: comps.month, day: comps.day)
+        let sps = ScheduledPromptScheduler.shared
+
+        let target = rule.nextTarget(after: now)!
+        let dates = sps.generateFireDates(
+            for: PromptItem(text: "Tom's birthday"), rule: rule, target: target, now: now,
+            horizon: sps.horizon(for: rule, target: target, now: now),
+            calendar: cal, dayStartHour: 9, dayEndHour: 20
+        )
+
+        let daysBefore = Set(dates.filter { $0 < cal.startOfDay(for: target) }.map { cal.startOfDay(for: $0) })
+        #expect(daysBefore.count >= 13)
+        #expect(dates.contains { cal.isDate($0, inSameDayAs: target) })
+    }
+
+    @Test func fortnightlyPromptIsQueuedDaysAheadEvenAtANightTime() {
+        let cal = Calendar.current
+        let now = todayAt(10)
+        let binNight = day(4, at: 0, from: now)
+        // 9pm sits outside the 9-20 reminder window, so lead-in days move to 9am.
+        let rule = PromptRule(timeHour: 21, timeMinute: 0, oneOff: false, fortnightlyAnchorDate: binNight)
+        let sps = ScheduledPromptScheduler.shared
+
+        let target = rule.nextTarget(after: now)!
+        let horizon = sps.horizon(for: rule, target: target, now: now)
+        #expect(horizon > target)
+
+        let dates = sps.generateFireDates(
+            for: PromptItem(text: "Bin night"), rule: rule, target: target, now: now,
+            horizon: horizon, calendar: cal, dayStartHour: 9, dayEndHour: 20
+        )
+        let leadIn = dates.filter { $0 < cal.startOfDay(for: target) }
+        #expect(!leadIn.isEmpty)
+        #expect(leadIn.allSatisfy { cal.component(.hour, from: $0) == 9 })
+        #expect(leadIn.contains { cal.isDate($0, inSameDayAs: day(-1, at: 9, from: target)) })
+    }
+
+    @Test func weeklyPromptWithTimeStillOnlyFiresOnItsDay() {
+        let cal = Calendar.current
+        let now = todayAt(10)
+        let wd = cal.component(.weekday, from: day(3, at: 0, from: now))
+        let rule = PromptRule(timeHour: 19, timeMinute: 0, weekday: wd, oneOff: false)
+        let sps = ScheduledPromptScheduler.shared
+
+        let target = rule.nextTarget(after: now)!
+        let dates = sps.generateFireDates(
+            for: PromptItem(text: "Gym"), rule: rule, target: target, now: now,
+            horizon: sps.horizon(for: rule, target: target, now: now),
+            calendar: cal, dayStartHour: 9, dayEndHour: 20
+        )
+        #expect(!dates.isEmpty)
+        #expect(dates.allSatisfy { cal.isDate($0, inSameDayAs: target) })
+    }
+
+    @Test func thinningKeepsBothEndsAndRespectsCap() {
+        let base = Date()
+        let dates = (0..<100).map { base.addingTimeInterval(Double($0) * 3600) }
+        let thinned = ScheduledPromptScheduler.shared.evenlyThinned(dates, to: 6)
+        #expect(thinned.count == 6)
+        #expect(thinned.first == dates.first)
+        #expect(thinned.last == dates.last)
+    }
+
 }
