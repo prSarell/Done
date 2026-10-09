@@ -229,4 +229,36 @@ struct DoneTests {
         #expect(stale == ["poo-1", "poo-2"])
     }
 
+    // MARK: - Cycle start
+    //
+    // Guards the fix for daily 8am reminders and weekly bin night vanishing: planning in
+    // the evening rolled the target to the next occurrence, but the "already acted on"
+    // check started at midnight today, so that morning's Done/Skip suppressed tomorrow's.
+
+    @Test func dailyReminderPlannedInTheEveningIgnoresThisMorningsAction() {
+        let cal = Calendar.current
+        let rule = PromptRule(timeHour: 8, timeMinute: 0, oneOff: false)
+        let evening = todayAt(23)
+        let target = rule.nextTarget(after: evening)!
+
+        #expect(cal.isDate(target, inSameDayAs: day(1, at: 0, from: evening)))
+        let skippedThisMorning = todayAt(8).addingTimeInterval(30 * 60)
+        #expect(skippedThisMorning < rule.cycleStart(for: target, now: evening))
+    }
+
+    @Test func weeklyReminderDoneTonightDoesNotCancelNextWeek() {
+        let cal = Calendar.current
+        let tonight = todayAt(21)
+        let rule = PromptRule(timeHour: 21, timeMinute: 0, weekday: cal.component(.weekday, from: tonight), oneOff: false)
+        let later = tonight.addingTimeInterval(2 * 3600)
+        let target = rule.nextTarget(after: later)!
+
+        #expect(cal.isDate(target, inSameDayAs: day(7, at: 0, from: tonight)))
+        let doneTonight = tonight.addingTimeInterval(15 * 60)
+        let start = rule.cycleStart(for: target, now: later)
+        #expect(doneTonight < start)
+        // Done early in the week still counts for that week.
+        #expect(day(3, at: 12, from: tonight) >= start)
+    }
+
 }

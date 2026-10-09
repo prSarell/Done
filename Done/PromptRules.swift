@@ -319,6 +319,28 @@ public extension PromptRule {
         }
     }
 
+    /// Earliest done/skip event that counts as acting on the occurrence at `target`.
+    ///
+    /// Usually the same as the lead-in start, but that's `now`-relative for daily and
+    /// weekly reminders: re-planning in the evening rolls the target on to tomorrow /
+    /// next week while the cycle still started at midnight *today*, so the morning's
+    /// Done/Skip on today's occurrence was read as having already handled the next one
+    /// and it was never scheduled (8am reminders and bin night going silent).
+    func cycleStart(for target: Date, now: Date, calendar cal: Calendar = .current) -> Date {
+        let targetDay = cal.startOfDay(for: target)
+        switch recurrenceKind {
+        case .weekly:
+            // Anything after the previous week's occurrence day counts, so marking it
+            // done early in the week still settles this week's.
+            return cal.date(byAdding: .day, value: -6, to: targetDay) ?? targetDay
+        case .oneOff where date == nil && oneOff == false:
+            // Repeating "every day at HH:MM" — only that day's own actions count.
+            return targetDay
+        default:
+            return leadInStart(for: target, now: now, calendar: cal)
+        }
+    }
+
     func leadInStart(for target: Date, now: Date, calendar cal: Calendar = .current) -> Date {
         switch recurrenceKind {
         case .none:

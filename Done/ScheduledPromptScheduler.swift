@@ -303,7 +303,7 @@ final class ScheduledPromptScheduler {
         calendar cal: Calendar
     ) -> Date? {
         if let previousTarget = rule.previousTarget(before: now, calendar: cal) {
-            let cycleStart = rule.leadInStart(for: previousTarget, now: now, calendar: cal)
+            let cycleStart = rule.cycleStart(for: previousTarget, now: now, calendar: cal)
             let completed = cycleCompleted(
                 promptID: prompt.id,
                 cycleStart: cycleStart,
@@ -326,7 +326,7 @@ final class ScheduledPromptScheduler {
             return nil
         }
 
-        let cycleStart = rule.leadInStart(for: nextTarget, now: now, calendar: cal)
+        let cycleStart = rule.cycleStart(for: nextTarget, now: now, calendar: cal)
         let completed = cycleCompleted(
             promptID: prompt.id,
             cycleStart: cycleStart,
@@ -355,7 +355,7 @@ final class ScheduledPromptScheduler {
         calendar cal: Calendar
     ) -> Date? {
         if let nextTarget = rule.nextTarget(after: now, calendar: cal) {
-            let cycleStart = rule.leadInStart(for: nextTarget, now: now, calendar: cal)
+            let cycleStart = rule.cycleStart(for: nextTarget, now: now, calendar: cal)
             let completed = cycleCompleted(
                 promptID: prompt.id,
                 cycleStart: cycleStart,
@@ -381,7 +381,7 @@ final class ScheduledPromptScheduler {
         }
 
         if let previousTarget = rule.previousTarget(before: now, calendar: cal) {
-            let cycleStart = rule.leadInStart(for: previousTarget, now: now, calendar: cal)
+            let cycleStart = rule.cycleStart(for: previousTarget, now: now, calendar: cal)
             let completed = cycleCompleted(
                 promptID: prompt.id,
                 cycleStart: cycleStart,
