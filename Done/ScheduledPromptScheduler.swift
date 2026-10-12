@@ -531,7 +531,7 @@ final class ScheduledPromptScheduler {
             // spam notifications starting the moment the rule is created/refreshed after
             // today's time has already passed, even though nothing was ever missed.
             // Only a genuinely dated one-off, or an explicit "Once" bare-time reminder
-            // (which self-purges ~24h later regardless), warrants the catch-up below.
+            // (purged the day after it's marked done), warrants the catch-up below.
             let isSelfRollingDailyReminder = (rule.date == nil && rule.oneOff == false)
 
             // All four candidates already passed — this only means the prompt is overdue

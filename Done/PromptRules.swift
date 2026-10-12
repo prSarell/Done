@@ -111,12 +111,8 @@ public struct PromptRule: Codable, Equatable {
             return now > cal.startOfDay(for: d).addingTimeInterval(24 * 60 * 60)
         }
 
-        // Fallback: one-off with time but no date means "today"
-        if timeHour != nil || timeMinute != nil {
-            let today = cal.startOfDay(for: now)
-            return now > today.addingTimeInterval(24 * 60 * 60)
-        }
-
+        // Undated one-offs (bare, time-only, weekday-only) have no day of their own to expire
+        // against — they're purged once marked done instead (see purgeCompletedOneOffPrompts).
         return false
     }
 }

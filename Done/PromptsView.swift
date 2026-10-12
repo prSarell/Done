@@ -575,10 +575,10 @@ struct PromptsView: View {
             }
         }
 
-        // Done greys the prompt out for the rest of the day. A dated/timed one-off then
-        // behaves like a repeating prompt — live again the next day — until its own date/time
-        // passes, at which point it's purged (see purgeCompletedOneOffPrompts). A bare one-off
-        // with no date/time is purged overnight instead, same as before.
+        // Done greys the prompt out for the rest of the day. A dated one-off then behaves
+        // like a repeating prompt — live again the next day — until its own date passes, at
+        // which point it's purged (see purgeCompletedOneOffPrompts). An undated one-off is
+        // purged overnight instead.
         if action == .done {
             doneTodayPromptIDs.insert(item.id)
             NotificationsManager.shared.scheduleMorningUpdateIfNeeded()
@@ -635,12 +635,12 @@ struct PromptsView: View {
 
     // MARK: - Done cleanup
 
-    /// Removes expired one-off prompts. A one-off that carries its own date and/or time keeps
-    /// resetting daily like a repeating prompt (greyed out for the day it's marked done, live
-    /// again the next day) until that date/time actually passes — marking it done early must
-    /// never delete it ahead of the date it exists to protect. A bare one-off with no date/time
-    /// has nothing of its own to wait for, so it's purged once marked done on a prior day, as
-    /// before. Called on launch and when the app returns to the foreground.
+    /// Removes expired one-off prompts. A one-off that carries its own date keeps resetting
+    /// daily like a repeating prompt (greyed out for the day it's marked done, live again the
+    /// next day) until that date actually passes — marking it done early must never delete it
+    /// ahead of the date it exists to protect. An undated one-off (bare, time-only or
+    /// weekday-only) has nothing of its own to wait for, so it's purged once marked done on a
+    /// prior day. Called on launch and when the app returns to the foreground.
     private func purgeCompletedOneOffPrompts() {
         let now = Date()
         let doneIDs = Set(
@@ -656,7 +656,10 @@ struct PromptsView: View {
             // isn't a genuine one-off — keep it. Only an explicit/inferred .oneOff purges.
             guard rule.recurrenceKind == .oneOff else { return false }
 
-            if rule.date != nil || rule.timeHour != nil || rule.timeMinute != nil {
+            // Only a real date protects a one-off from early deletion. A time-only "Once"
+            // reminder re-targets today every day, so waiting for its time to "pass" meant
+            // it was never purged and kept coming back after being marked done.
+            if rule.date != nil {
                 return rule.shouldAutoDelete(after: now)
             }
 
