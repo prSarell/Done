@@ -12,7 +12,17 @@
 			<key>Title</key>
 			<string>Notification Frequency</string>
 			<key>FooterText</key>
-			<string>Cold = fewer reminders (about every 60 minutes). Hot = more reminders (about every 10 minutes).</string>
+			<string>Rolling Prompts sends random prompts from your lists through the day. Turn it off to only get prompts with a set schedule. Cold = fewer rolling prompts (about every 60 minutes). Hot = more (about every 10 minutes).</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Rolling Prompts</string>
+			<key>Key</key>
+			<string>random_prompts_enabled</string>
+			<key>DefaultValue</key>
+			<true/>
 		</dict>
 		<dict>
 			<key>Type</key>

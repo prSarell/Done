@@ -10,6 +10,9 @@ import UserNotifications
 
 // Simple knobs we’ll expose in a settings screen later
 struct RandomPromptRules: Codable {
+    /// Off = no rolling random prompts at all; scheduled/dated prompts still fire.
+    var randomPromptsEnabled: Bool = true
+
     // NOTE: promptsPerDay/minGapMinutes kept for backward-compat,
     // but this 20-min build derives count from the window length.
     var promptsPerDay: Int = 5              // (unused in this build)
@@ -72,6 +75,7 @@ extension RandomPromptRules {
     static func loadFromUserDefaults() -> RandomPromptRules {
         let defaults = UserDefaults.standard
         var rules = RandomPromptRules()
+        rules.randomPromptsEnabled = defaults.bool(forKey: "random_prompts_enabled")
         rules.intervalMinutes = intervalMinutes(forIntensity: defaults.double(forKey: "notification_intensity"))
         rules.dayStartHour = defaults.integer(forKey: "global_earliest_hour")
         rules.dayEndHour = defaults.integer(forKey: "global_latest_hour")
@@ -163,6 +167,19 @@ final class RandomPromptScheduler {
         rules: RandomPromptRules,
         forceRebuild: Bool
     ) {
+        guard rules.randomPromptsEnabled else {
+            #if DEBUG
+            print("RPS: rolling prompts are switched off, cancelling any pending rand-*")
+            #endif
+            // Only pending requests — banners already on the Lock Screen stay put.
+            NotificationsManager.shared.cancelPending(prefix: "rand-")
+            var history = loadHistory()
+            history.pendingIDs.removeAll()
+            saveHistory(history)
+            finishRefresh()
+            return
+        }
+
         guard !allPrompts.isEmpty else {
             #if DEBUG
             print("RPS: no prompts supplied, skipping random plan rebuild")

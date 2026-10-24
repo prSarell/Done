@@ -33,6 +33,7 @@ struct DoneApp: App {
         // Settings.bundle defaults (Settings app → Done!) — must mirror the DefaultValue
         // entries in Done/Settings.bundle/Root.plist and the per-category child pane plists.
         UserDefaults.standard.register(defaults: [
+            "random_prompts_enabled": true,
             "notification_intensity": 0.5,
             "global_earliest_hour": 7,
             "global_latest_hour": 20,
@@ -127,7 +128,7 @@ private func currentPromptSettings() -> (
         .sorted { $0.key.settingsKey < $1.key.settingsKey }
         .map { "\($0.key.settingsKey):\($0.value.startHour)-\($0.value.endHour)-\($0.value.weekendsQuiet)" }
         .joined(separator: ",")
-    let signature = "\(rules.intervalMinutes)|\(rules.dayStartHour)|\(rules.dayEndHour)|\(windowsSignature)"
+    let signature = "\(rules.randomPromptsEnabled)|\(rules.intervalMinutes)|\(rules.dayStartHour)|\(rules.dayEndHour)|\(windowsSignature)"
 
     let defaults = UserDefaults.standard
     let lastAppliedKey = "last_applied_prompt_settings_signature"
