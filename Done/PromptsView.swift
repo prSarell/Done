@@ -557,22 +557,7 @@ struct PromptsView: View {
 
         // Cancel pending notifications and remove delivered banners for this prompt
         Task {
-            let center = UNUserNotificationCenter.current()
-            async let pendingAsync = center.pendingNotificationRequests()
-            async let deliveredAsync = center.deliveredNotifications()
-            let (pending, delivered) = await (pendingAsync, deliveredAsync)
-            let toCancel = pending
-                .filter { $0.identifier.contains(item.id.uuidString) }
-                .map { $0.identifier }
-            let toRemove = delivered
-                .filter { $0.request.identifier.contains(item.id.uuidString) }
-                .map { $0.request.identifier }
-            if !toCancel.isEmpty {
-                center.removePendingNotificationRequests(withIdentifiers: toCancel)
-            }
-            if !toRemove.isEmpty {
-                center.removeDeliveredNotifications(withIdentifiers: toRemove)
-            }
+            await NotificationsManager.shared.clearNotifications(forPromptID: item.id)
         }
 
         // Done greys the prompt out for the rest of the day. A dated one-off then behaves

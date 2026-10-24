@@ -138,6 +138,9 @@ final class ScheduledPromptScheduler {
             }
 
             let now = Date()
+            // Re-read after the cancel pass: a Done/Skip recorded while it ran would otherwise
+            // be missed and that prompt's remaining nudges queued straight back up.
+            let events = PromptStatusStore.load()
 
             var allRequests: [PendingScheduledNotification] = []
 
@@ -214,11 +217,11 @@ final class ScheduledPromptScheduler {
                     ]
 
                     let title = rule.isImportant == true ? "⭐️ \(prompt.text)" : prompt.text
+                    let isApproach = rule.timeHour != nil
+                        && Self.isApproachNudge(fireDate: fireDate, target: target)
                     allRequests.append(
                         PendingScheduledNotification(
                             id: id,
-                    let isApproach = rule.timeHour != nil
-                        && Self.isApproachNudge(fireDate: fireDate, target: target)
                             title: title,
                             subtitle: subtitle,
                             fireDate: fireDate,
@@ -229,12 +232,12 @@ final class ScheduledPromptScheduler {
                 }
             }
 
+            // Approach nudges claim slots first; everything else fills what's left, soonest first.
             let finalRequests = Array(
                 allRequests
                     .sorted {
                         $0.isApproach != $1.isApproach ? $0.isApproach : $0.fireDate < $1.fireDate
                     }
-            // Approach nudges claim slots first; everything else fills what's left, soonest first.
                     .prefix(self.globalNotificationCap)
             )
 
@@ -506,10 +509,10 @@ final class ScheduledPromptScheduler {
             let candidates: [Date] = [
                 target.addingTimeInterval(-30 * 60),
                 target.addingTimeInterval(-15 * 60),
+                target,
                 target.addingTimeInterval(15 * 60),
                 target.addingTimeInterval(30 * 60)
             ]
-                target,
             let dayOfResults = candidates.filter { $0 >= minimumFireDate && $0 <= horizon }
 
             // Dated prompts with a time (a birthday at 9am, bin night at 7pm) used to get
@@ -697,15 +700,15 @@ final class ScheduledPromptScheduler {
         return results
     }
 
-    /// One reminder per day from the lead-in start up to the day before `target`, at the
-    /// prompt's own time — or at `dayStartHour` when that time falls outside the global
-    /// reminder window, so a 9pm bin night still gets its run-up instead of every lead-in
     /// True for the -30/-15/on-time nudges of a timed prompt — see `approachWindow`.
     static func isApproachNudge(fireDate: Date, target: Date) -> Bool {
         let lead = target.timeIntervalSince(fireDate)
         return lead >= 0 && lead <= approachWindow
     }
 
+    /// One reminder per day from the lead-in start up to the day before `target`, at the
+    /// prompt's own time — or at `dayStartHour` when that time falls outside the global
+    /// reminder window, so a 9pm bin night still gets its run-up instead of every lead-in
     /// fire being dropped by the quiet-hours filter.
     private func leadInDailyFireDates(
         rule: PromptRule,
@@ -872,5 +875,5 @@ private struct PendingScheduledNotification {
     let subtitle: String
     let fireDate: Date
     let userInfo: [AnyHashable: Any]
-}
     let isApproach: Bool
+}

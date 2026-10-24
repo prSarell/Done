@@ -201,6 +201,35 @@ final class NotificationsManager {
         return !withinAllowed
     }
 
+    /// Clears every pending and delivered notification for a prompt once it's been marked
+    /// done/skipped. Removal is asynchronous inside UserNotifications, and when Done/Skip is
+    /// tapped on the Lock Screen the app is suspended as soon as the action handler returns —
+    /// often before the removal was committed, so the prompt's later nudges (e.g. the +15
+    /// after Done on the -15) still fired. Re-reading the pending list waits for the removal
+    /// to actually go through, and catches anything it missed.
+    func clearNotifications(forPromptID promptID: UUID) async {
+        let center = UNUserNotificationCenter.current()
+        let key = promptID.uuidString
+
+        let delivered = await center.deliveredNotifications()
+            .map(\.request.identifier)
+            .filter { $0.contains(key) }
+        if !delivered.isEmpty {
+            center.removeDeliveredNotifications(withIdentifiers: delivered)
+        }
+
+        for _ in 0..<3 {
+            let pending = await center.pendingNotificationRequests()
+                .map(\.identifier)
+                .filter { $0.contains(key) }
+            guard !pending.isEmpty else { return }
+            center.removePendingNotificationRequests(withIdentifiers: pending)
+            #if DEBUG
+            print("🗑️ NotificationsManager: cancelled \(pending.count) pending notification(s) for \(key)")
+            #endif
+        }
+    }
+
     /// Removes older delivered banners for any prompt that has more than one sitting on the
     /// Lock Screen / Notification Center, keeping only the newest (which still carries the
     /// Done/Skip actions). iOS gives no hook when a local notification is delivered while the

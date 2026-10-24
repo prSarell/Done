@@ -26,6 +26,13 @@ final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelega
     // Show banner while app open
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        if let idString = notification.request.content.userInfo[Self.kPromptID] as? String,
+           let promptID = UUID(uuidString: idString),
+           Self.actedOnToday(promptID) {
+            await NotificationsManager.shared.clearNotifications(forPromptID: promptID)
+            return []
+        }
+
         // The new banner isn't in the delivered list until after this returns, so collapse
         // shortly afterwards to clear the older copies it replaces.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
@@ -81,29 +88,17 @@ final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelega
         print("✅ Recorded prompt action:", action.rawValue, "|", promptText)
         #endif
 
-        // Cancel any remaining queued notifications for this prompt so they don't fire later today
-        // Also remove delivered notifications so stale banners clear from the lock screen
-        let center = UNUserNotificationCenter.current()
-        async let pendingAsync = center.pendingNotificationRequests()
-        async let deliveredAsync = center.deliveredNotifications()
-        let (pending, delivered) = await (pendingAsync, deliveredAsync)
-        let toCancel = pending
-            .filter { $0.identifier.contains(promptID.uuidString) }
-            .map { $0.identifier }
-        let toRemove = delivered
-            .filter { $0.request.identifier.contains(promptID.uuidString) }
-            .map { $0.request.identifier }
-        if !toCancel.isEmpty {
-            center.removePendingNotificationRequests(withIdentifiers: toCancel)
-            #if DEBUG
-            print("🗑️ Cancelled \(toCancel.count) pending notification(s) for '\(promptText)'")
-            #endif
-        }
-        if !toRemove.isEmpty {
-            center.removeDeliveredNotifications(withIdentifiers: toRemove)
-            #if DEBUG
-            print("🗑️ Removed \(toRemove.count) delivered notification(s) for '\(promptText)'")
-            #endif
-        }
+        // Cancel any remaining queued notifications for this prompt so they don't fire later today,
+        // and clear its delivered banners from the lock screen. Awaited in full: once this
+        // returns iOS may suspend the app straight away.
+        await NotificationsManager.shared.clearNotifications(forPromptID: promptID)
+    }
+
+    /// True when the prompt already has a done/skip recorded today — a banner for it that
+    /// slipped through (e.g. queued by a re-plan that started just before the action) is
+    /// dropped instead of shown.
+    private static func actedOnToday(_ promptID: UUID) -> Bool {
+        let todayStart = Calendar.current.startOfDay(for: Date())
+        return PromptStatusStore.load().contains { $0.promptID == promptID && $0.occurredAt >= todayStart }
     }
 }
