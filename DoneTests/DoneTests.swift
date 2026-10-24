@@ -205,6 +205,23 @@ struct DoneTests {
         #expect(dates.allSatisfy { cal.isDate($0, inSameDayAs: target) })
     }
 
+    @Test func timedAppointmentNudgesInTheRunUpAndOnTheTime() {
+        let cal = Calendar.current
+        let now = todayAt(9)
+        let appointment = todayAt(15)
+        let rule = PromptRule(timeHour: 15, timeMinute: 0, date: cal.startOfDay(for: now), oneOff: true)
+        let sps = ScheduledPromptScheduler.shared
+
+        let dates = sps.generateFireDates(
+            for: PromptItem(text: "Peter Pan"), rule: rule, target: appointment, now: now,
+            horizon: sps.horizon(for: rule, target: appointment, now: now),
+            calendar: cal, dayStartHour: 7, dayEndHour: 22
+        )
+        let approach = dates.filter { ScheduledPromptScheduler.isApproachNudge(fireDate: $0, target: appointment) }
+        #expect(approach == [-30, -15, 0].map { appointment.addingTimeInterval(Double($0) * 60) })
+        #expect(!ScheduledPromptScheduler.isApproachNudge(fireDate: appointment.addingTimeInterval(15 * 60), target: appointment))
+    }
+
     @Test func thinningKeepsBothEndsAndRespectsCap() {
         let base = Date()
         let dates = (0..<100).map { base.addingTimeInterval(Double($0) * 3600) }
