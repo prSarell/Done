@@ -158,8 +158,15 @@ public extension PromptRule {
         return .none
     }
 
+    /// A bare "Once" (no date, day or time) only means "delete after done" — it has nothing
+    /// to schedule against, so it stays in the random rotation. Counting it as scheduled
+    /// dropped it from the random feed and left it to an end-of-day lead-in ramp that the
+    /// quiet hours and the sched cap mostly swallowed.
     var hasSchedulingRule: Bool {
-        recurrenceKind != .none
+        if recurrenceKind == .oneOff, date == nil, weekday == nil, timeHour == nil {
+            return false
+        }
+        return recurrenceKind != .none
     }
 
     /// Prompts tied to a calendar date (birthdays, monthly bills, fortnightly bin night,

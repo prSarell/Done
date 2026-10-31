@@ -278,4 +278,20 @@ struct DoneTests {
         #expect(day(3, at: 12, from: tonight) >= start)
     }
 
+    // MARK: - Bare "Once" to-dos stay in the random feed
+    //
+    // Guards the fix for to-dos set to Once with no date/day/time (the whole Work list)
+    // vanishing from the random prompts: they counted as scheduled, so only the
+    // scheduled side looked at them, and it had no real time to aim for.
+
+    @Test func bareOnceToDoStaysInRandomPoolButIsStillPurgedWhenDone() {
+        let bareOnce = PromptRule(oneOff: true)
+        #expect(!bareOnce.hasSchedulingRule)
+        #expect(bareOnce.recurrenceKind == .oneOff)
+
+        #expect(PromptRule(timeHour: 9, timeMinute: 0, oneOff: true).hasSchedulingRule)
+        #expect(PromptRule(weekday: 2, oneOff: true).hasSchedulingRule)
+        #expect(PromptRule(date: todayAt(0), oneOff: true).hasSchedulingRule)
+    }
+
 }
