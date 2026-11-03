@@ -36,6 +36,8 @@ struct PromptRow: View {
     let item: PromptItem
     let alertLabel: String
     let isImportant: Bool
+    // Once (deleted-when-done) to-dos get a green alert capsule so they stand out from repeats.
+    var isOneOff: Bool = false
     let isDoneToday: Bool
     let isSkippedToday: Bool
     let onAlertTap: () -> Void
@@ -75,7 +77,7 @@ struct PromptRow: View {
                     .padding(.vertical, 4)
                     .background(
                         Capsule()
-                            .stroke(tintColor ?? Color.accentColor, lineWidth: 1)
+                            .stroke(tintColor ?? (isOneOff ? Color.green : Color.accentColor), lineWidth: 1)
                     )
             }
             .buttonStyle(.plain)
@@ -457,6 +459,7 @@ struct PromptsView: View {
                         item: item,
                         alertLabel: PromptAlertEditorModel.label(for: rules[item.id.uuidString]),
                         isImportant: rules[item.id.uuidString]?.isImportant == true,
+                        isOneOff: rules[item.id.uuidString]?.isOneOff == true,
                         isDoneToday: doneTodayPromptIDs.contains(item.id),
                         isSkippedToday: skippedTodayPromptIDs.contains(item.id),
                         onAlertTap: {
@@ -637,10 +640,9 @@ struct PromptsView: View {
 
         let shouldRemove: (PromptItem) -> Bool = { [rules] item in
             guard let rule = rules[item.id.uuidString] else { return false }
-            if rule.oneOff == false { return false }  // explicitly marked repeat, keep it
-            // No rule, or a rule that doesn't structurally resolve to one-off, means this
-            // isn't a genuine one-off — keep it. Only an explicit/inferred .oneOff purges.
-            guard rule.recurrenceKind == .oneOff else { return false }
+            // Explicitly marked repeat, or a legacy rule that doesn't structurally resolve to
+            // one-off, means this isn't a genuine one-off — keep it.
+            guard rule.isOneOff else { return false }
 
             // Only a real date protects a one-off from early deletion. A time-only "Once"
             // reminder re-targets today every day, so waiting for its time to "pass" meant

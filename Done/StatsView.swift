@@ -361,6 +361,7 @@ struct StatsView: View {
             item: item,
             alertLabel: PromptAlertEditorModel.label(for: rules[item.id.uuidString]),
             isImportant: true,
+            isOneOff: rules[item.id.uuidString]?.isOneOff == true,
             isDoneToday: doneTodayPromptIDs.contains(item.id),
             isSkippedToday: skippedTodayPromptIDs.contains(item.id),
             onAlertTap: {

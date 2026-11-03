@@ -159,6 +159,13 @@ public extension PromptRule {
         return .none
     }
 
+    /// Whether the to-do is "Once" (deleted after it's done) rather than repeating. Matches
+    /// the alert editor's Once/Repeat picker: an explicit choice wins, and legacy rules with
+    /// no explicit choice fall back to their recurrence structure.
+    var isOneOff: Bool {
+        oneOff ?? (recurrenceKind == .oneOff)
+    }
+
     /// A bare "Once" (no date, day or time) only means "delete after done" — it has nothing
     /// to schedule against, so it stays in the random rotation. Counting it as scheduled
     /// dropped it from the random feed and left it to an end-of-day lead-in ramp that the

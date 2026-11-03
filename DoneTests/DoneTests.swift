@@ -379,4 +379,17 @@ struct DoneTests {
         #expect(PromptRule(date: todayAt(0), oneOff: true).hasSchedulingRule)
     }
 
+    // The green "Once" capsule must agree with the alert editor's Once/Repeat picker:
+    // an explicit choice wins, legacy rules (oneOff == nil) fall back to their structure.
+    @Test func isOneOffMatchesTheEditorsOnceRepeatChoice() {
+        #expect(PromptRule(oneOff: true).isOneOff)
+        #expect(PromptRule(timeHour: 9, timeMinute: 0, oneOff: true).isOneOff)
+        #expect(!PromptRule(oneOff: false).isOneOff)
+        #expect(!PromptRule(date: todayAt(0), oneOff: false).isOneOff)  // dated yearly-style repeat
+
+        #expect(PromptRule(date: todayAt(0)).isOneOff)             // legacy dated -> Once
+        #expect(!PromptRule(weekday: 2).isOneOff)                  // legacy weekly -> Repeat
+        #expect(!PromptRule().isOneOff)                            // nothing set -> Repeat
+    }
+
 }
