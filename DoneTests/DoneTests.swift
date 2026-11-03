@@ -447,4 +447,94 @@ struct DoneTests {
         #expect(planned.filter { cal.isDate($0.fireDate, inSameDayAs: at(18, 0)) }.map(\.kind) == [.primary])
     }
 
+
+    // MARK: - Sharing prompts and lists (PromptSharing.swift)
+
+    private func sampleList() -> (PromptList, [String: PromptRule]) {
+        let dentist = PromptItem(text: "Dentist")
+        let assembly = PromptItem(text: "School assembly")
+        let oldTrip = PromptItem(text: "Last month's excursion")
+        var dentistRule = PromptRule(timeHour: 15, timeMinute: 0, date: at(7, 0), oneOff: true)
+        dentistRule.isImportant = true
+        let rules: [String: PromptRule] = [
+            dentist.id.uuidString: dentistRule,
+            assembly.id.uuidString: PromptRule(timeHour: 9, timeMinute: 0, weekday: friday, oneOff: false),
+            oldTrip.id.uuidString: PromptRule(date: at(4, 0, month: 10), oneOff: true),
+        ]
+        return (PromptList(name: "School Events", items: [dentist, assembly, oldTrip]), rules)
+    }
+
+    @Test func sharedListRoundTripsThroughTheFileFormat() throws {
+        let (list, rules) = sampleList()
+        let file = PromptShareFile.forList(list, category: .events, rules: rules)
+        let decoded = try PromptShareFile.decode(try file.encoded())
+
+        #expect(decoded == file)
+        #expect(decoded.kind == .list)
+        #expect(decoded.sourceCategory == .events)
+        #expect(decoded.prompts.map(\.text) == ["Dentist", "School assembly", "Last month's excursion"])
+        #expect(decoded.prompts[0].rule?.isImportant == true)
+    }
+
+    @Test func importingAListMakesANewListWithFreshIDsAndSkipsPastOnes() {
+        let (list, rules) = sampleList()
+        let file = PromptShareFile.forList(list, category: .events, rules: rules)
+        let receiverLists = [PromptList(name: "General")]
+
+        #expect(PromptShareImport.defaultDestination(for: file, in: receiverLists) == .newList)
+        let result = PromptShareImport.apply(file, destination: .newList, lists: receiverLists, rules: [:], now: wednesday10am)
+
+        #expect(result.lists.count == 2)
+        let imported = result.lists[1]
+        #expect(imported.name == "School Events")
+        #expect(imported.items.map(\.text) == ["Dentist", "School assembly"])
+        #expect(result.skippedPast == 1)
+        #expect(result.added == 2)
+        // New IDs, and each carries its alert rule across.
+        #expect(Set(imported.items.map(\.id)).isDisjoint(with: Set(list.items.map(\.id))))
+        #expect(result.rules[imported.items[0].id.uuidString]?.timeHour == 15)
+        #expect(result.rules[imported.items[1].id.uuidString]?.weekday == friday)
+    }
+
+    @Test func importingIntoAnExistingListSkipsPromptsItAlreadyHas() {
+        let (list, rules) = sampleList()
+        let file = PromptShareFile.forList(list, category: .events, rules: rules)
+        let existing = PromptList(name: "School Events", items: [PromptItem(text: "dentist")])
+
+        let result = PromptShareImport.apply(file, destination: .existing(existing.id),
+                                             lists: [existing], rules: [:], now: wednesday10am)
+        #expect(result.lists.count == 1)
+        #expect(result.lists[0].items.map(\.text) == ["dentist", "School assembly"])
+        #expect(result.skippedDuplicates == 1)
+    }
+
+    @Test func aSinglePromptDefaultsToTheListWithTheSameName() {
+        let item = PromptItem(text: "Netball training")
+        let file = PromptShareFile.forPrompt(item, listName: "sport", category: .weekly, rules: [:])
+        let lists = [PromptList(name: "General"), PromptList(name: "Sport")]
+
+        #expect(PromptShareImport.defaultDestination(for: file, in: lists) == .existing(lists[1].id))
+        let result = PromptShareImport.apply(file, destination: .existing(lists[1].id), lists: lists, rules: [:])
+        #expect(result.lists[1].items.map(\.text) == ["Netball training"])
+        // No rule on the sender's side → the usual Repeat default.
+        #expect(result.rules[result.lists[1].items[0].id.uuidString] == PromptRule(oneOff: false))
+    }
+
+    @Test func receivedFilesAreSanitised() throws {
+        var bad = PromptShareFile(kind: .list, category: "nonsense", listName: "  ", prompts: [
+            .init(text: "   ", rule: nil),
+            .init(text: "Ok", rule: PromptRule(timeHour: 99, timeMinute: 0, weekday: 12)),
+        ])
+        let clean = try PromptShareFile.decode(try bad.encoded())
+        #expect(clean.listName == "Shared")
+        #expect(clean.sourceCategory == .daily)
+        #expect(clean.prompts.count == 1)
+        #expect(clean.prompts[0].rule?.timeHour == nil)
+        #expect(clean.prompts[0].rule?.weekday == nil)
+
+        bad.version = PromptShareFile.currentVersion + 1
+        #expect(throws: PromptShareFile.ReadError.self) { try PromptShareFile.decode(try bad.encoded()) }
+        #expect(throws: PromptShareFile.ReadError.self) { try PromptShareFile.decode(Data("hello".utf8)) }
+    }
+
 }

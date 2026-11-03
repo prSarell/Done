@@ -66,6 +66,7 @@ Banner Done/Skip (PromptNotificationDelegate)
 | `Done/StatsView.swift` | Important prompts list, its own Done/Skip (`markImportantPrompt`) |
 | `Done/DoneApp.swift` | Registers Settings defaults, plans on launch/foreground, deletes expired dated one-offs |
 | `Done/Settings.bundle/*.plist` | Settings app → Done!: global earliest/latest hour, frequency slider, Rolling Prompts switch, per-category quiet windows |
+| `Done/PromptSharing.swift`, `PromptImportSheet.swift` | Share/receive `.doneprompts` files. Imported prompts get fresh IDs and their rules are added through PromptsView's normal `rules` change → re-plan. Past dated Once prompts are skipped. |
 | `DoneTests/DoneTests.swift` | Unit tests (Swift Testing) for all of the above |
 | `Done/LockNudgeScheduler.swift` | **Dead code**, never called. Has its own hard-coded quiet hours. Don't wire up without fixing that. |
 
@@ -289,7 +290,7 @@ xcodebuild test -scheme Done \
   -only-testing:DoneTests
 ```
 (Destination by simulator **id** for iPhone 16 Pro. Using `name=` failed on this machine.
-`xcrun simctl list devices available` lists the ids.) 33 tests as of 2026-11-03.
+`xcrun simctl list devices available` lists the ids.) 38 tests as of 2026-11-03.
 
 ### Debug console
 DEBUG builds log every planned notification: `SPS:   primary 'Bins' at … (repeating)`, plus

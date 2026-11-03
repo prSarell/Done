@@ -400,6 +400,7 @@
 				DEVELOPMENT_TEAM = K9U33HB9KQ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Done-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Done!";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
@@ -433,6 +434,7 @@
 				DEVELOPMENT_TEAM = K9U33HB9KQ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Done-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Done!";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";

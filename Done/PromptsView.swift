@@ -46,6 +46,8 @@ struct PromptRow: View {
     // nil hides the Mark/Remove Important context menu entry — used on the Stats page,
     // where every row shown is already important by definition.
     var onToggleImportant: (() -> Void)? = nil
+    // nil hides Share (the Stats page doesn't offer it).
+    var onShare: (() -> Void)? = nil
 
     private static let skippedColor = Color(red: 0.4, green: 0.7, blue: 1.0)
 
@@ -96,6 +98,11 @@ struct PromptRow: View {
                         isImportant ? "Remove Important" : "Mark Important",
                         systemImage: isImportant ? "star.slash" : "star"
                     )
+                }
+            }
+            if let onShare {
+                Button { onShare() } label: {
+                    Label("Share", systemImage: "square.and.arrow.up")
                 }
             }
         }
@@ -178,6 +185,18 @@ struct PromptsView: View {
     @State private var scheduleTask: Task<Void, Never>?
 
     @Environment(\.scenePhase) private var scenePhase
+
+    // Shared prompts/lists received from Messages, AirDrop or Files (see PromptSharing.swift)
+    @ObservedObject private var shareInbox = PromptShareInbox.shared
+
+    /// Only offers a received share once lists are loaded, so the import can't be
+    /// overwritten by the initial load.
+    private var pendingImportBinding: Binding<PendingPromptImport?> {
+        Binding(
+            get: { hasFinishedInitialLoad ? shareInbox.pending : nil },
+            set: { shareInbox.pending = $0 }
+        )
+    }
 
     // MARK: - Derived collections / helpers
 
@@ -362,6 +381,39 @@ struct PromptsView: View {
         .sheet(isPresented: $alertEditor.isPresented) {
             PromptAlertEditorSheet(editor: alertEditor)
         }
+
+        // A shared prompt or list was opened in Done!
+        .sheet(item: pendingImportBinding) { pending in
+            PromptImportSheet(
+                file: pending.file,
+                listsFor: { listsBinding(for: $0).wrappedValue },
+                rules: rules,
+                onAdd: { category, destination in
+                    applyImport(pending.file, category: category, destination: destination)
+                    shareInbox.pending = nil
+                },
+                onCancel: { shareInbox.pending = nil }
+            )
+        }
+        .alert(
+            "Couldn't Open Share",
+            isPresented: Binding(
+                get: { shareInbox.errorMessage != nil },
+                set: { if !$0 { shareInbox.errorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { shareInbox.errorMessage = nil }
+        } message: {
+            Text(shareInbox.errorMessage ?? "")
+        }
+    }
+
+    private func applyImport(_ file: PromptShareFile, category: PromptCategory, destination: PromptShareDestination) {
+        let binding = listsBinding(for: category)
+        let result = PromptShareImport.apply(file, destination: destination, lists: binding.wrappedValue, rules: rules)
+        binding.wrappedValue = result.lists
+        rules = result.rules
+        selectedCategory = category
     }
 
     private func onPromptsMutated() {
@@ -469,7 +521,12 @@ struct PromptsView: View {
                         },
                         onDone: { markPrompt(item, action: .done) },
                         onSkip: { markPrompt(item, action: .skipped) },
-                        onToggleImportant: { toggleImportant(item) }
+                        onToggleImportant: { toggleImportant(item) },
+                        onShare: {
+                            PromptSharePresenter.share(.forPrompt(
+                                item, listName: list.wrappedValue.name, category: category, rules: rules
+                            ))
+                        }
                     )
                 }
                 .onDelete { indexSet in
@@ -497,6 +554,12 @@ struct PromptsView: View {
                 } label: {
                     Label("Rename", systemImage: "pencil")
                 }
+                Button {
+                    PromptSharePresenter.share(.forList(list.wrappedValue, category: category, rules: rules))
+                } label: {
+                    Label("Share List", systemImage: "square.and.arrow.up")
+                }
+                .disabled(list.wrappedValue.items.isEmpty)
                 Button(role: .destructive) {
                     listPendingDeletion = (category, list.wrappedValue.id)
                     showingDeleteListConfirm = true
