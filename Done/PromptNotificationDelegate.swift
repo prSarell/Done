@@ -92,6 +92,11 @@ final class PromptNotificationDelegate: NSObject, UNUserNotificationCenterDelega
         // and clear its delivered banners from the lock screen. Awaited in full: once this
         // returns iOS may suspend the app straight away.
         await NotificationsManager.shared.clearNotifications(forPromptID: promptID)
+
+        // Clearing also removed the prompt's repeating daily/weekly alert (and any later
+        // occurrence's). The app may not be opened again for days, so re-queue the next
+        // occurrence now rather than waiting for the next full re-plan.
+        await ScheduledPromptScheduler.shared.requeueNextOccurrence(promptID: promptID)
     }
 
     /// True when the prompt already has a done/skip recorded today — a banner for it that

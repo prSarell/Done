@@ -555,10 +555,6 @@ struct PromptsView: View {
             PromptActionEvent(promptID: item.id, promptText: item.text, action: action)
         )
 
-        // Cancel pending notifications and remove delivered banners for this prompt
-        Task {
-            await NotificationsManager.shared.clearNotifications(forPromptID: item.id)
-        }
 
         // Done greys the prompt out for the rest of the day. A dated one-off then behaves
         // like a repeating prompt — live again the next day — until its own date passes, at
@@ -579,7 +575,12 @@ struct PromptsView: View {
             skippedTodayPromptIDs.insert(item.id)
         }
 
-        scheduleRandomPromptsDebounced(forceRebuild: true)
+        // Clear this prompt's pending/delivered notifications first, then re-plan — the
+        // re-plan queues its next occurrence, which a still-running clear would remove.
+        Task { @MainActor in
+            await NotificationsManager.shared.clearNotifications(forPromptID: item.id)
+            scheduleRandomPromptsDebounced(forceRebuild: true)
+        }
     }
 
     private func toggleImportant(_ item: PromptItem) {

@@ -12,6 +12,7 @@ public enum PromptRecurrenceKind: String, Codable {
     case yearly
     case monthly
     case fortnightly
+    case daily        // time only + Repeat: every day at that time
 }
 
 public struct PromptRule: Codable, Equatable {
@@ -148,11 +149,11 @@ public extension PromptRule {
             return .oneOff
         }
 
-        // Fallback support:
-        // If the UI saved a time but no other recurrence structure,
-        // treat it as a one-off scheduled for today at that time.
+        // A time with no other recurrence structure: "every day at HH:MM" when Repeat is
+        // chosen, otherwise a one-off for today at that time (legacy rules with no explicit
+        // oneOff also land here, as they always did).
         if timeHour != nil, timeMinute != nil {
-            return .oneOff
+            return oneOff == false ? .daily : .oneOff
         }
 
         return .none
@@ -175,7 +176,7 @@ public extension PromptRule {
         switch recurrenceKind {
         case .yearly, .monthly, .fortnightly: return true
         case .oneOff: return date != nil
-        case .weekly, .none: return false
+        case .weekly, .daily, .none: return false
         }
     }
 
@@ -193,6 +194,10 @@ public extension PromptRule {
         }
 
         switch recurrenceKind {
+        case .daily:
+            if let t = timeString() { return "Every day · \(t)" }
+            return "Every day"
+
         case .weekly:
             let dayName: String
             if let wd = weekday, wd >= 1, wd <= 7 {
@@ -269,6 +274,12 @@ public extension PromptRule {
             let target = targetDate(forBaseDay: baseDay, calendar: cal)
             return (target >= now) ? target : nil
 
+        case .daily:
+            let today = targetDate(forBaseDay: now, calendar: cal)
+            if today >= now { return today }
+            guard let tomorrow = cal.date(byAdding: .day, value: 1, to: now) else { return nil }
+            return targetDate(forBaseDay: tomorrow, calendar: cal)
+
         case .weekly:
             guard let wd = weekday else { return nil }
 
@@ -303,6 +314,12 @@ public extension PromptRule {
             let target = targetDate(forBaseDay: baseDay, calendar: cal)
             return (target <= now) ? target : nil
 
+        case .daily:
+            let today = targetDate(forBaseDay: now, calendar: cal)
+            if today <= now { return today }
+            guard let yesterday = cal.date(byAdding: .day, value: -1, to: now) else { return nil }
+            return targetDate(forBaseDay: yesterday, calendar: cal)
+
         case .weekly:
             guard let wd = weekday else { return nil }
             let thisWeekTarget = targetForWeekday(wd, relativeTo: now, calendar: cal)
@@ -336,8 +353,8 @@ public extension PromptRule {
             // Anything after the previous week's occurrence day counts, so marking it
             // done early in the week still settles this week's.
             return cal.date(byAdding: .day, value: -6, to: targetDay) ?? targetDay
-        case .oneOff where date == nil && oneOff == false:
-            // Repeating "every day at HH:MM" — only that day's own actions count.
+        case .daily:
+            // Every day at HH:MM — only that day's own actions count.
             return targetDay
         default:
             return leadInStart(for: target, now: now, calendar: cal)
@@ -348,6 +365,9 @@ public extension PromptRule {
         switch recurrenceKind {
         case .none:
             return target
+
+        case .daily:
+            return cal.startOfDay(for: target)
 
         case .weekly:
             // Start the lead-in immediately (not just on the target's own day) so a
@@ -393,26 +413,6 @@ private extension PromptRule {
                 return thisWeekTarget
             }
             return cal.date(byAdding: .day, value: 7, to: thisWeekTarget) ?? thisWeekTarget
-        }
-
-        // Fallback for a repeating "every day at HH:MM" reminder (time set, no date/weekday,
-        // oneOff == false): treat it as scheduled for today, unless today's occurrence plus
-        // its ~30 min catch-up window (the ±30/±15 min candidates generated in
-        // ScheduledPromptScheduler.generateFireDates) has already passed. Without this
-        // roll-forward, a daily reminder that's not caught within that narrow window (e.g.
-        // the app isn't opened between 6:30-7:30 for a 7:00 reminder) would keep re-targeting
-        // today's unrecoverable slot on every later refresh and never fire again until the
-        // next calendar day happens to line up — going dark for the whole day with no catch-up,
-        // since self-rolling reminders intentionally skip the overdue catch-up path (see the
-        // isSelfRollingDailyReminder comment there). Rolling forward here queues tomorrow's
-        // occurrence with iOS as soon as any refresh runs, mirroring how weekly reminders
-        // already queue their next occurrence immediately once the current one passes.
-        if let h = timeHour, let m = timeMinute, oneOff == false {
-            let todayTarget = cal.date(bySettingHour: h, minute: m, second: 0, of: now) ?? now
-            let recoveryCutoff = todayTarget.addingTimeInterval(30 * 60)
-            if now > recoveryCutoff {
-                return cal.date(byAdding: .day, value: 1, to: now) ?? now
-            }
         }
 
         // Fallback for one-off + time but no explicit date:

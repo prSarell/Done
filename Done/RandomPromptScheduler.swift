@@ -118,7 +118,18 @@ final class RandomPromptScheduler {
 
     private let refreshLock = NSLock()
     private var isRefreshing: Bool = false
-    private var lastRefreshAt: Date? = nil
+
+    /// A refresh requested while one was running. Dropping it (as this used to) meant a
+    /// prompt added or edited mid-refresh wasn't scheduled until the app was next opened;
+    /// instead the latest request runs as soon as the current one finishes.
+    private struct RefreshRequest {
+        var allPrompts: [PromptItem]
+        var categoryPromptIDs: [PromptCategory: Set<UUID>]
+        var categoryQuietWindows: [PromptCategory: CategoryQuietWindow]
+        var rules: RandomPromptRules
+        var forceRebuild: Bool
+    }
+    private var queuedRefresh: RefreshRequest?
 
     // MARK: - Entry point
 
@@ -140,6 +151,25 @@ final class RandomPromptScheduler {
         #if DEBUG
         print("RPS: refreshScheduleToday called with \(allPrompts.count) prompts | forceRebuild=\(forceRebuild)")
         #endif
+
+        refreshLock.lock()
+        if isRefreshing {
+            // Latest data wins; a forced rebuild stays forced even if a later call isn't.
+            queuedRefresh = RefreshRequest(
+                allPrompts: allPrompts,
+                categoryPromptIDs: categoryPromptIDs,
+                categoryQuietWindows: categoryQuietWindows,
+                rules: rules,
+                forceRebuild: forceRebuild || (queuedRefresh?.forceRebuild ?? false)
+            )
+            refreshLock.unlock()
+            #if DEBUG
+            print("RPS: refresh already running — queued this one to run next")
+            #endif
+            return
+        }
+        isRefreshing = true
+        refreshLock.unlock()
 
         // Scheduled/date-driven prompts are handled by their own scheduler. Wait for it to
         // fully settle before planning random ones, so we know the real "sched-*" pending
@@ -188,58 +218,36 @@ final class RandomPromptScheduler {
             return
         }
 
-        // Prevent overlapping refresh calls
-        refreshLock.lock()
-        if isRefreshing {
-            #if DEBUG
-            print("RPS: skipped refresh because a refresh is already in progress")
-            #endif
-            refreshLock.unlock()
-            return
-        }
-        isRefreshing = true
-
-        // Tiny throttle to avoid spam refresh loops
-        let nowForThrottle = Date()
-        if let last = lastRefreshAt, nowForThrottle.timeIntervalSince(last) < 0.5 {
-            #if DEBUG
-            print("RPS: throttled refresh (\(nowForThrottle.timeIntervalSince(last))s since last)")
-            #endif
-            isRefreshing = false
-            refreshLock.unlock()
-            return
-        }
-        lastRefreshAt = nowForThrottle
-        refreshLock.unlock()
-
         let now = Date()
         let cal = Calendar.current
         let todayKey = Self.dayKey(now)
 
         var history = loadHistory()
 
-        // Plan only once per calendar day, unless forceRebuild is true
-        if !forceRebuild, history.lastPlanDate == todayKey {
-            #if DEBUG
-            print("RPS: random plan already exists for today, not rebuilding")
-            #endif
-            finishRefresh()
-            return
-        }
-
-        // Cancel any pending plan we know about
-        if !history.pendingIDs.isEmpty {
-            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: history.pendingIDs)
-            history.pendingIDs.removeAll()
-        }
-
-        // Belt + braces:
-        // If history was missing/corrupt before, we may have old rand-* requests queued.
-        // Remove all pending rand-* requests so we don’t stack duplicates.
         UNUserNotificationCenter.current().getPendingNotificationRequests { reqs in
             let randIDs = reqs
                 .map(\.identifier)
                 .filter { $0.hasPrefix("rand-") }
+            let schedCountBefore = reqs.filter { $0.identifier.hasPrefix("sched-") }.count
+
+            // Plan only once per calendar day, unless forced — but the scheduled side was
+            // just re-planned and may have grown since this morning. If the two together
+            // would now overflow iOS's limit (it silently discards the latest-firing
+            // requests, which could be tomorrow's alerts), rebuild to fit.
+            if !forceRebuild, history.lastPlanDate == todayKey,
+               schedCountBefore + randIDs.count <= Self.combinedNotificationCap {
+                #if DEBUG
+                print("RPS: random plan already exists for today, not rebuilding")
+                #endif
+                self.finishRefresh()
+                return
+            }
+
+            // Cancel any pending plan we know about
+            if !history.pendingIDs.isEmpty {
+                UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: history.pendingIDs)
+                history.pendingIDs.removeAll()
+            }
 
             if !randIDs.isEmpty {
                 UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: randIDs)
@@ -560,7 +568,21 @@ final class RandomPromptScheduler {
     private func finishRefresh() {
         refreshLock.lock()
         isRefreshing = false
+        let next = queuedRefresh
+        queuedRefresh = nil
         refreshLock.unlock()
+
+        if let next {
+            DispatchQueue.main.async {
+                self.refreshScheduleToday(
+                    allPrompts: next.allPrompts,
+                    categoryPromptIDs: next.categoryPromptIDs,
+                    categoryQuietWindows: next.categoryQuietWindows,
+                    rules: next.rules,
+                    forceRebuild: next.forceRebuild
+                )
+            }
+        }
     }
 
     private static func dayKey(_ date: Date) -> String {

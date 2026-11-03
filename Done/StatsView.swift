@@ -382,8 +382,18 @@ struct StatsView: View {
         )
         events = PromptStatusStore.load()
 
-        Task {
+        // Clear this prompt's notifications, then re-plan (for Skip as well as Done —
+        // the re-plan is what queues the prompt's next occurrence).
+        Task { @MainActor in
             await NotificationsManager.shared.clearNotifications(forPromptID: item.id)
+            guard let state = PromptsStore.loadSafe() else { return }
+            RandomPromptScheduler.shared.refreshScheduleToday(
+                allPrompts: state.allItems,
+                categoryPromptIDs: state.categoryPromptIDs,
+                categoryQuietWindows: CategoryQuietWindow.loadAllFromUserDefaults(),
+                rules: RandomPromptRules.loadFromUserDefaults(),
+                forceRebuild: true
+            )
         }
 
         if action == .skipped {
@@ -399,16 +409,6 @@ struct StatsView: View {
 
         // Greys the prompt out for the rest of the day; one-off prompts are purged
         // overnight by PromptsView.purgeCompletedOneOffPrompts, mirroring markPrompt(_:action:).
-        guard let state = PromptsStore.loadSafe() else { return }
-
-        RandomPromptScheduler.shared.refreshScheduleToday(
-            allPrompts: state.allItems,
-            categoryPromptIDs: state.categoryPromptIDs,
-            categoryQuietWindows: CategoryQuietWindow.loadAllFromUserDefaults(),
-            rules: RandomPromptRules.loadFromUserDefaults(),
-            forceRebuild: true
-        )
-
         loadImportantPrompts()
     }
 

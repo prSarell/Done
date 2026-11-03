@@ -8,834 +8,235 @@
 import Foundation
 import UserNotifications
 
+/// One notification the scheduled-prompt planner wants queued with iOS.
+struct PlannedScheduledNotification {
+    /// What a notification is *for*. The order is also the priority order when the
+    /// shared notification budget runs short (see `ScheduledPromptScheduler.prioritised`).
+    enum Kind: Int {
+        case primary    // the alert at the time/day the user actually set
+        case approach   // -30 / -15 min before a set time
+        case followUp   // +15 / +30 min after a set time, or later the same day for a day-only prompt
+        case leadIn     // the days before a dated prompt (birthday, bin night, bill)
+        case overdue    // a one-off whose time has passed without Done/Skip
+    }
+
+    let promptID: UUID
+    let promptText: String
+    let kind: Kind
+    /// The occurrence (target date) this notification belongs to.
+    let occurrence: Date
+    /// When it fires. For a repeating request, its next fire.
+    let fireDate: Date
+    /// Non-nil for a repeating trigger (daily / weekly primary), which keeps firing on
+    /// every match without the app needing to be opened again.
+    let repeating: DateComponents?
+}
+
+/// Everything the planner needs besides the prompts themselves.
+struct ScheduledPlanContext {
+    var now: Date
+    var calendar: Calendar = .current
+    var dayStartHour: Int
+    var dayEndHour: Int
+    var categoryQuietWindows: [PromptCategory: CategoryQuietWindow] = [:]
+    var categoryOf: [UUID: PromptCategory] = [:]
+
+    init(
+        now: Date,
+        calendar: Calendar = .current,
+        dayStartHour: Int,
+        dayEndHour: Int,
+        categoryQuietWindows: [PromptCategory: CategoryQuietWindow] = [:],
+        categoryPromptIDs: [PromptCategory: Set<UUID>] = [:]
+    ) {
+        self.now = now
+        self.calendar = calendar
+        self.dayStartHour = dayStartHour
+        self.dayEndHour = dayEndHour
+        self.categoryQuietWindows = categoryQuietWindows
+        for (category, ids) in categoryPromptIDs {
+            for id in ids { categoryOf[id] = category }
+        }
+    }
+
+    /// Current settings from the Settings app (Settings.bundle → UserDefaults).
+    static func fromUserDefaults(now: Date = Date(), categoryPromptIDs: [PromptCategory: Set<UUID>]) -> ScheduledPlanContext {
+        let rules = RandomPromptRules.loadFromUserDefaults()
+        return ScheduledPlanContext(
+            now: now,
+            dayStartHour: rules.dayStartHour,
+            dayEndHour: rules.dayEndHour,
+            categoryQuietWindows: CategoryQuietWindow.loadAllFromUserDefaults(),
+            categoryPromptIDs: categoryPromptIDs
+        )
+    }
+}
+
+/// Plans notifications for every prompt with a day/date/time rule, across all categories.
+///
+/// How it works, per prompt:
+/// 1. Work out its upcoming *occurrences* (next Friday, the 15th, 8am tomorrow…), skipping
+///    any already settled by a Done/Skip (`PromptRule.cycleStart`).
+/// 2. Give each occurrence a **primary** alert — at the set time, or for a day-only prompt
+///    at the first non-quiet hour that day. A time the user chose explicitly is never
+///    silenced by quiet hours: quiet hours exist to hush the random feed and the extra
+///    nudges, and used to swallow a 9pm bin night or a 5:30pm Work reminder entirely.
+///    Daily and weekly primaries are repeating iOS triggers, so they keep arriving even
+///    if the app isn't opened for weeks.
+/// 3. Add the optional extras (run-up nudges, follow-ups, lead-in days, overdue nags),
+///    which do respect quiet hours.
+/// 4. When everything won't fit in the shared budget, primaries win, then the run-up to
+///    anything in the next 24h, then extras — so one busy category can't push another
+///    category's on-time alert out.
 final class ScheduledPromptScheduler {
     static let shared = ScheduledPromptScheduler()
     private init() {}
 
-    // Agreed rules
-    private let horizonHours: Double = 24
-    // 7 = the five on-the-day nudges for a timed prompt (see generateFireDates) plus two
-    // lead-in days for a dated one.
-    private let maxNotificationsPerPrompt: Int = 7
-    private let overdueInterval: TimeInterval = 60 * 60 * 3   // 3 hours
     // iOS keeps at most ~64 pending notifications per app, shared with RandomPromptScheduler
-    // (which gets whatever this leaves under its combined cap of 60). Capped well below 60 so
-    // scheduled prompts can't take the whole budget: 15 daily set-time reminders × 4 nudges
-    // each, plus a birthday's 30-day lead-in ramp, used to fill all 60 by themselves and
-    // starve the random feed (and every unscheduled category, e.g. Mindfulness) for weeks.
-    // Soonest fires are kept; anything trimmed is re-queued on the next app open.
+    // (which gets whatever this leaves under its combined cap of 60). Capped below 60 so
+    // scheduled prompts can't take the whole budget and starve the random feed.
     static let scheduledNotificationCap: Int = 40
-    private let globalNotificationCap: Int = ScheduledPromptScheduler.scheduledNotificationCap
-    private let idPrefix = "sched-"
 
-    // The run-up to a set time (-30, -15 and the time itself) is what gets someone to an
-    // appointment, so when the cap bites these are kept ahead of everything else. Trimming
-    // purely by soonest-first used to let overdue catch-up nags and other prompts' nudges
-    // fill all 40 slots, dropping a 3pm appointment's 2:30/2:45 reminders entirely.
+    /// The run-up to a set time (-30, -15 and the time itself).
     static let approachWindow: TimeInterval = 30 * 60
 
-    // Yearly prompts (birthdays, anniversaries, etc.) get a much longer runway than other
-    // recurrence kinds: reminders start at the full 30-day lead-in (see PromptRule.leadInStart)
-    // instead of only the next 24h, and ramp up in frequency approaching the date.
-    private let maxNotificationsPerYearlyPrompt: Int = 50
+    /// Notifications are never queued sooner than this from "now".
+    private static let minimumLead: TimeInterval = 5
+    /// One-off occurrences further out than this aren't queued yet — the app will have been
+    /// opened (and re-planned) long before then, and they'd only tie up slots.
+    private static let occurrenceHorizon: TimeInterval = 35 * 24 * 3600
+    /// Overdue one-offs: first nag an hour after planning (not instantly — planning runs
+    /// every time something is edited in the app), then every 3 hours.
+    private static let overdueFirstDelay: TimeInterval = 60 * 60
+    private static let overdueInterval: TimeInterval = 3 * 60 * 60
+    private static let maxOverdueNags = 4
 
-    // Near-target behaviour
-    private let immediateWindow: TimeInterval = 5 * 60        // within 5 minutes -> fire immediately
-    private let immediateLeadSeconds: TimeInterval = 5        // first alert 5 seconds from now
+    private let idPrefix = "sched-"
 
-    // Re-entrancy guard / throttle
+    // Re-entrancy guard. RandomPromptScheduler serialises full refreshes, so this only
+    // protects against a stray direct caller.
     private let refreshLock = NSLock()
-    private var isRefreshing: Bool = false
-    private var lastRefreshAt: Date? = nil
+    private var isRefreshing = false
 
-    // MARK: - Entry point
+    // MARK: - Entry point (full rebuild)
 
-    /// `onComplete` fires once this scheduler's own cancel/rebuild pass has fully settled
-    /// (on every exit path, including reentrancy/throttle skips), so callers that need to
-    /// coordinate a shared notification budget — see `RandomPromptScheduler` — can rely on
-    /// `sched-*` pending requests being in their final state by the time it's called.
+    /// Rebuilds every `sched-*` notification. `onComplete` fires once every request has
+    /// actually been accepted by iOS, so `RandomPromptScheduler` can size its own budget
+    /// against the real pending count.
     func refreshSchedule(
         prompts: [PromptItem],
         categoryPromptIDs: [PromptCategory: Set<UUID>] = [:],
         categoryQuietWindows: [PromptCategory: CategoryQuietWindow] = [:],
         globalRules: RandomPromptRules = .init(),
-        forceRebuild: Bool = true,
         calendar cal: Calendar = .current,
         onComplete: @escaping () -> Void = {}
     ) {
-        #if DEBUG
-        print("SPS: refreshSchedule called with \(prompts.count) prompts | forceRebuild=\(forceRebuild)")
-        #endif
-
         refreshLock.lock()
         if isRefreshing {
+            refreshLock.unlock()
             #if DEBUG
             print("SPS: skipped refresh because a refresh is already in progress")
             #endif
-            refreshLock.unlock()
             onComplete()
             return
         }
         isRefreshing = true
-
-        let nowForThrottle = Date()
-        if let last = lastRefreshAt, nowForThrottle.timeIntervalSince(last) < 0.5 {
-            #if DEBUG
-            print("SPS: throttled refresh (\(nowForThrottle.timeIntervalSince(last))s since last)")
-            #endif
-            isRefreshing = false
-            refreshLock.unlock()
-            onComplete()
-            return
-        }
-        lastRefreshAt = nowForThrottle
         refreshLock.unlock()
 
-        let rulesByID = PromptRulesStore.load() ?? [:]
-        let events = PromptStatusStore.load()
-
-        #if DEBUG
-        print("SPS: loaded \(rulesByID.count) rules")
-        print("SPS: loaded \(events.count) prompt action events")
-        #endif
-
-        let scheduledPrompts = prompts.filter { item in
-            guard let rule = rulesByID[item.id.uuidString] else {
-                #if DEBUG
-                print("SPS: no rule found for prompt '\(item.text)'")
-                #endif
-                return false
-            }
-
-            let valid = rule.hasSchedulingRule
+        // If prompt_rules.json can't be read, leave what's already queued alone rather
+        // than wiping every scheduled reminder because the rules "look" empty.
+        guard let rulesByID = PromptRulesStore.load() else {
             #if DEBUG
-            if !valid {
-                print("SPS: rule exists but has no scheduling rule for '\(item.text)'")
-            }
+            print("SPS: prompt_rules.json failed to load — keeping existing sched-* requests")
             #endif
-            return valid
-        }
-
-        #if DEBUG
-        print("SPS: found \(scheduledPrompts.count) prompts with usable schedule rules")
-        #endif
-
-        guard !scheduledPrompts.isEmpty else {
-            NotificationsManager.shared.cancelPending(prefix: idPrefix) { [weak self] in
-                #if DEBUG
-                print("SPS: no scheduled prompts found, cancelled all pending sched-* notifications")
-                #endif
-                self?.finishRefresh()
-                onComplete()
-            }
+            finishRefresh()
+            onComplete()
             return
         }
 
         NotificationsManager.shared.cancelPending(prefix: idPrefix) { [weak self] in
-            guard let self else {
-                onComplete()
-                return
-            }
+            guard let self else { onComplete(); return }
 
-            let now = Date()
-            // Re-read after the cancel pass: a Done/Skip recorded while it ran would otherwise
-            // be missed and that prompt's remaining nudges queued straight back up.
+            // Re-read after the cancel pass so a Done/Skip recorded meanwhile is respected.
             let events = PromptStatusStore.load()
-
-            var allRequests: [PendingScheduledNotification] = []
-
-            for prompt in scheduledPrompts {
-                guard let rule = rulesByID[prompt.id.uuidString] else {
-                    #if DEBUG
-                    print("SPS: skipped '\(prompt.text)' because its rule disappeared during refresh")
-                    #endif
-                    continue
-                }
-
-                #if DEBUG
-                print("SPS: evaluating prompt '\(prompt.text)' | recurrence=\(rule.recurrenceKind.rawValue)")
-                #endif
-
-                guard let target = self.currentOrNextTarget(
-                    for: prompt,
-                    rule: rule,
-                    now: now,
-                    events: events,
-                    calendar: cal
-                ) else {
-                    #if DEBUG
-                    print("SPS: no current/next target for '\(prompt.text)'")
-                    #endif
-                    continue
-                }
-
-                let leadInStart = rule.leadInStart(for: target, now: now, calendar: cal)
-                let horizon = self.horizon(for: rule, target: target, now: now)
-
-                #if DEBUG
-                print("SPS: '\(prompt.text)' target=\(target) | leadInStart=\(leadInStart) | horizon=\(horizon)")
-                #endif
-
-                let rawDates = self.generateFireDates(
-                    for: prompt,
-                    rule: rule,
-                    target: target,
-                    now: now,
-                    horizon: horizon,
-                    calendar: cal,
-                    dayStartHour: globalRules.dayStartHour,
-                    dayEndHour: globalRules.dayEndHour
-                )
-
-                let promptCategory = self.category(for: prompt.id, in: categoryPromptIDs)
-                let dates = rawDates.filter {
-                    !self.isQuietHour(
-                        $0,
-                        category: promptCategory,
-                        categoryQuietWindows: categoryQuietWindows,
-                        dayStartHour: globalRules.dayStartHour,
-                        dayEndHour: globalRules.dayEndHour,
-                        calendar: cal
-                    )
-                }
-
-                if dates.isEmpty {
-                    #if DEBUG
-                    print("SPS: generated 0 notifications for '\(prompt.text)' (raw=\(rawDates.count), quiet-hours filtered=\(rawDates.count - dates.count))")
-                    #endif
-                }
-
-                let subtitle = rule.scheduleDescription
-
-                for (index, fireDate) in dates.enumerated() {
-                    let id = self.notificationID(for: prompt.id, fireDate: fireDate, index: index)
-
-                    let userInfo: [AnyHashable: Any] = [
-                        PromptNotificationDelegate.kPromptID: prompt.id.uuidString,
-                        PromptNotificationDelegate.kPromptText: prompt.text,
-                        PromptNotificationDelegate.kPromptDate: fireDate.timeIntervalSince1970
-                    ]
-
-                    let title = rule.isImportant == true ? "⭐️ \(prompt.text)" : prompt.text
-                    let isApproach = rule.timeHour != nil
-                        && Self.isApproachNudge(fireDate: fireDate, target: target)
-                    allRequests.append(
-                        PendingScheduledNotification(
-                            id: id,
-                            title: title,
-                            subtitle: subtitle,
-                            fireDate: fireDate,
-                            userInfo: userInfo,
-                            isApproach: isApproach
-                        )
-                    )
-                }
-            }
-
-            // Approach nudges claim slots first; everything else fills what's left, soonest first.
-            let finalRequests = Array(
-                allRequests
-                    .sorted {
-                        $0.isApproach != $1.isApproach ? $0.isApproach : $0.fireDate < $1.fireDate
-                    }
-                    .prefix(self.globalNotificationCap)
+            let context = ScheduledPlanContext(
+                now: Date(),
+                calendar: cal,
+                dayStartHour: globalRules.dayStartHour,
+                dayEndHour: globalRules.dayEndHour,
+                categoryQuietWindows: categoryQuietWindows,
+                categoryPromptIDs: categoryPromptIDs
             )
+            let planned = Self.plan(prompts: prompts, rules: rulesByID, events: events, context: context)
+            let final = Self.prioritised(planned, now: context.now, cap: Self.scheduledNotificationCap)
 
             #if DEBUG
-            print("SPS: generated \(allRequests.count) raw sched requests, keeping \(finalRequests.count)")
+            print("SPS: planned \(planned.count) sched requests, keeping \(final.count)")
+            for p in final {
+                print("SPS:   \(p.kind) '\(p.promptText)' at \(p.fireDate)\(p.repeating != nil ? " (repeating)" : "")")
+            }
             #endif
 
-            if finalRequests.isEmpty {
-                #if DEBUG
-                print("SPS: no sched-* notifications to schedule in current horizon")
-                #endif
+            Task {
+                for p in final {
+                    await self.enqueue(p, rule: rulesByID[p.promptID.uuidString])
+                }
+                self.finishRefresh()
+                onComplete()
             }
-
-            for req in finalRequests {
-                #if DEBUG
-                print("SPS: scheduling '\(req.title)' at \(req.fireDate) | id=\(req.id)")
-                #endif
-
-                NotificationsManager.shared.scheduleOneOff(
-                    id: req.id,
-                    title: req.title,
-                    at: req.fireDate,
-                    subtitle: req.subtitle,
-                    userInfo: req.userInfo,
-                    categoryID: PromptNotificationDelegate.categoryID
-                )
-            }
-
-            #if DEBUG
-            print("SPS: scheduled \(finalRequests.count) notifications across \(scheduledPrompts.count) scheduled prompts")
-            self.dumpPendingScheduledNotifications()
-            #endif
-
-            self.finishRefresh()
-            onComplete()
         }
     }
 
-    // MARK: - Target selection
+    /// After Done/Skip on a banner, every pending notification for that prompt is cleared
+    /// (so nothing more fires for the occurrence just handled). That also removes the
+    /// prompt's repeating daily/weekly trigger, and the app may not be opened again for
+    /// days — so put the *next* occurrence's primary straight back.
+    func requeueNextOccurrence(promptID: UUID) async {
+        guard let state = PromptsStore.loadSafe(),
+              let rules = PromptRulesStore.load(),
+              let rule = rules[promptID.uuidString],
+              rule.hasSchedulingRule,
+              let prompt = state.allItems.first(where: { $0.id == promptID })
+        else { return }
 
-    private func currentOrNextTarget(
-        for prompt: PromptItem,
-        rule: PromptRule,
-        now: Date,
-        events: [PromptActionEvent],
-        calendar cal: Calendar
-    ) -> Date? {
-        switch rule.recurrenceKind {
-        case .oneOff:
-            return currentOrNextTargetForOneOff(
-                prompt: prompt,
-                rule: rule,
-                now: now,
-                events: events,
-                calendar: cal
-            )
+        let context = ScheduledPlanContext.fromUserDefaults(categoryPromptIDs: state.categoryPromptIDs)
+        let primaries = Self.planPrompt(prompt, rule: rule, events: PromptStatusStore.load(), context: context)
+            .filter { $0.kind == .primary }
+            .sorted { $0.fireDate < $1.fireDate }
+            .prefix(2)
 
-        case .weekly, .monthly, .yearly, .fortnightly:
-            return currentOrNextTargetForRecurring(
-                prompt: prompt,
-                rule: rule,
-                now: now,
-                events: events,
-                calendar: cal
-            )
-
-        case .none:
-            #if DEBUG
-            print("SPS: '\(prompt.text)' has recurrence .none in currentOrNextTarget")
-            #endif
-            return nil
+        for p in primaries {
+            await enqueue(p, rule: rule)
         }
+        #if DEBUG
+        print("SPS: re-queued \(primaries.count) primary alert(s) for '\(prompt.text)' after Done/Skip")
+        #endif
     }
 
-    private func currentOrNextTargetForOneOff(
-        prompt: PromptItem,
-        rule: PromptRule,
-        now: Date,
-        events: [PromptActionEvent],
-        calendar cal: Calendar
-    ) -> Date? {
-        if let previousTarget = rule.previousTarget(before: now, calendar: cal) {
-            let cycleStart = rule.cycleStart(for: previousTarget, now: now, calendar: cal)
-            let completed = cycleCompleted(
-                promptID: prompt.id,
-                cycleStart: cycleStart,
-                events: events
-            )
-
-            #if DEBUG
-            print("SPS: one-off previous target for '\(prompt.text)' = \(previousTarget) | completed=\(completed)")
-            #endif
-
-            if !completed {
-                return previousTarget
-            }
+    private func enqueue(_ p: PlannedScheduledNotification, rule: PromptRule?) async {
+        var userInfo: [AnyHashable: Any] = [
+            PromptNotificationDelegate.kPromptID: p.promptID.uuidString,
+            PromptNotificationDelegate.kPromptText: p.promptText
+        ]
+        // A repeating trigger fires on many dates, so its delivery date (not a baked-in
+        // one) is what a Done/Skip on it should be recorded against.
+        if p.repeating == nil {
+            userInfo[PromptNotificationDelegate.kPromptDate] = p.fireDate.timeIntervalSince1970
         }
 
-        guard let nextTarget = rule.nextTarget(after: now, calendar: cal) else {
-            #if DEBUG
-            print("SPS: one-off nextTarget returned nil for '\(prompt.text)'")
-            #endif
-            return nil
-        }
+        let title = rule?.isImportant == true ? "⭐️ \(p.promptText)" : p.promptText
+        let id = p.repeating != nil
+            ? "\(idPrefix)\(p.promptID.uuidString)-repeat"
+            : "\(idPrefix)\(p.promptID.uuidString)-\(p.kind.rawValue)-\(Int(p.fireDate.timeIntervalSince1970))"
 
-        let cycleStart = rule.cycleStart(for: nextTarget, now: now, calendar: cal)
-        let completed = cycleCompleted(
-            promptID: prompt.id,
-            cycleStart: cycleStart,
-            events: events
+        await NotificationsManager.shared.add(
+            id: id,
+            title: title,
+            subtitle: rule?.scheduleDescription,
+            userInfo: userInfo,
+            fireDate: p.fireDate,
+            repeating: p.repeating
         )
-
-        #if DEBUG
-        print("SPS: one-off next target for '\(prompt.text)' = \(nextTarget) | cycleStart=\(cycleStart) | completed=\(completed)")
-        #endif
-
-        if completed {
-            #if DEBUG
-            print("SPS: one-off '\(prompt.text)' already completed for current cycle, no target returned")
-            #endif
-            return nil
-        }
-
-        return nextTarget
-    }
-
-    private func currentOrNextTargetForRecurring(
-        prompt: PromptItem,
-        rule: PromptRule,
-        now: Date,
-        events: [PromptActionEvent],
-        calendar cal: Calendar
-    ) -> Date? {
-        if let nextTarget = rule.nextTarget(after: now, calendar: cal) {
-            let cycleStart = rule.cycleStart(for: nextTarget, now: now, calendar: cal)
-            let completed = cycleCompleted(
-                promptID: prompt.id,
-                cycleStart: cycleStart,
-                events: events
-            )
-
-            #if DEBUG
-            print("SPS: recurring next target for '\(prompt.text)' = \(nextTarget) | cycleStart=\(cycleStart) | completed=\(completed)")
-            #endif
-
-            if completed {
-                let later = nextTarget.addingTimeInterval(1)
-                let future = rule.nextTarget(after: later, calendar: cal)
-
-                #if DEBUG
-                print("SPS: recurring '\(prompt.text)' current cycle already done, advanced to future target \(String(describing: future))")
-                #endif
-
-                return future
-            }
-
-            return nextTarget
-        }
-
-        if let previousTarget = rule.previousTarget(before: now, calendar: cal) {
-            let cycleStart = rule.cycleStart(for: previousTarget, now: now, calendar: cal)
-            let completed = cycleCompleted(
-                promptID: prompt.id,
-                cycleStart: cycleStart,
-                events: events
-            )
-
-            #if DEBUG
-            print("SPS: recurring previous target fallback for '\(prompt.text)' = \(previousTarget) | completed=\(completed)")
-            #endif
-
-            if now <= previousTarget {
-                return previousTarget
-            }
-
-            if now <= endOfRecurringWindow(for: previousTarget, rule: rule, calendar: cal), !completed {
-                #if DEBUG
-                print("SPS: recurring '\(prompt.text)' is still within active window for previous target")
-                #endif
-                return previousTarget
-            }
-        }
-
-        #if DEBUG
-        print("SPS: recurring '\(prompt.text)' has no valid current or future target")
-        #endif
-        return nil
-    }
-
-    private func cycleCompleted(
-        promptID: UUID,
-        cycleStart: Date,
-        events: [PromptActionEvent]
-    ) -> Bool {
-        events.contains { $0.promptID == promptID && $0.occurredAt >= cycleStart }
-    }
-
-    // MARK: - Quiet hours
-
-    private func category(
-        for promptID: UUID,
-        in categoryPromptIDs: [PromptCategory: Set<UUID>]
-    ) -> PromptCategory? {
-        categoryPromptIDs.first { $0.value.contains(promptID) }?.key
-    }
-
-    /// Mirrors the global + per-category quiet-hours enforcement `RandomPromptScheduler`
-    /// applies to random prompts (see `CategoryQuietWindow.isQuiet` and the `dayStartHour`/
-    /// `dayEndHour` clip in `RandomPromptScheduler.planNow`), so a dated/recurring prompt
-    /// can't slip a notification past the user's quiet-hours settings just because this
-    /// scheduler plans multiple days ahead instead of a single day's window.
-    private func isQuietHour(
-        _ date: Date,
-        category: PromptCategory?,
-        categoryQuietWindows: [PromptCategory: CategoryQuietWindow],
-        dayStartHour: Int,
-        dayEndHour: Int,
-        calendar cal: Calendar
-    ) -> Bool {
-        if let category, let window = categoryQuietWindows[category], window.isQuiet(at: date, cal: cal) {
-            return true
-        }
-
-        guard dayStartHour != dayEndHour else { return false }
-        let hour = cal.component(.hour, from: date)
-        let withinGlobalWindow = dayStartHour < dayEndHour
-            ? (hour >= dayStartHour && hour < dayEndHour)
-            : (hour >= dayStartHour || hour < dayEndHour)
-        return !withinGlobalWindow
-    }
-
-    // MARK: - Planning horizon
-
-    /// How far ahead we're willing to actually schedule notifications for a prompt.
-    /// Most recurrence kinds only plan the next 24h and rely on being re-run regularly
-    /// (app open/foreground) to roll the window forward day by day. Yearly and weekly
-    /// prompts instead get a horizon reaching all the way to their target (plus a short
-    /// overdue buffer), so the full lead-in ramp is queued up front and doesn't depend on
-    /// the app being reopened on the exact target day to keep showing up.
-    ///
-    /// Monthly, fortnightly and dated one-off prompts used to get only the 24h horizon,
-    /// so their lead-in reminders (and the target day itself) only reached iOS if the app
-    /// happened to be opened within the 24h before each fire — e.g. a fortnightly bin
-    /// night stayed silent whenever the app wasn't opened the day before.
-    func horizon(for rule: PromptRule, target: Date, now: Date) -> Date {
-        if rule.hasDatedLeadIn || rule.recurrenceKind == .weekly {
-            return target.addingTimeInterval(24 * 3600)
-        }
-        return now.addingTimeInterval(horizonHours * 3600)
-    }
-
-    // MARK: - Fire date generation
-
-    func generateFireDates(
-        for prompt: PromptItem,
-        rule: PromptRule,
-        target: Date,
-        now: Date,
-        horizon: Date,
-        calendar cal: Calendar,
-        dayStartHour: Int,
-        dayEndHour: Int
-    ) -> [Date] {
-        // Time-specific prompts: fire twice in the 30 min before, at the time itself, and twice
-        // in the 30 min after. Marking done/skip from any notification cancels the rest
-        // (handled by the delegate).
-        if rule.timeHour != nil, rule.timeMinute != nil {
-            let minimumFireDate = now.addingTimeInterval(immediateLeadSeconds)
-            let candidates: [Date] = [
-                target.addingTimeInterval(-30 * 60),
-                target.addingTimeInterval(-15 * 60),
-                target,
-                target.addingTimeInterval(15 * 60),
-                target.addingTimeInterval(30 * 60)
-            ]
-            let dayOfResults = candidates.filter { $0 >= minimumFireDate && $0 <= horizon }
-
-            // Dated prompts with a time (a birthday at 9am, bin night at 7pm) used to get
-            // only these four nudges on the day itself — the lead-in ramp below was skipped
-            // entirely because it lives in the date-only branch. Add one reminder per day
-            // across the lead-in window so the run-up isn't silent.
-            let cap = rule.recurrenceKind == .yearly ? maxNotificationsPerYearlyPrompt : maxNotificationsPerPrompt
-            var results = dayOfResults
-            if rule.hasDatedLeadIn {
-                let leadIn = leadInDailyFireDates(
-                    rule: rule,
-                    target: target,
-                    now: now,
-                    minimumFireDate: minimumFireDate,
-                    calendar: cal,
-                    dayStartHour: dayStartHour,
-                    dayEndHour: dayEndHour
-                )
-                // Keep the days closest to the target when the cap bites.
-                let room = max(0, cap - dayOfResults.count)
-                results = Array(leadIn.suffix(room)) + dayOfResults
-            }
-
-            if !results.isEmpty {
-                #if DEBUG
-                print("SPS: '\(prompt.text)' time-window fire dates: \(results)")
-                #endif
-                return results
-            }
-
-            // A bare time-only rule with oneOff == false (e.g. "repeat every day at 9am")
-            // has no `date`, so its base day is always `now`-relative (see
-            // effectiveOneOffBaseDay) — today's occurrence already rolls over to tomorrow's
-            // on the next refresh with no help needed. Catching it up here would instead
-            // spam notifications starting the moment the rule is created/refreshed after
-            // today's time has already passed, even though nothing was ever missed.
-            // Only a genuinely dated one-off, or an explicit "Once" bare-time reminder
-            // (purged the day after it's marked done), warrants the catch-up below.
-            let isSelfRollingDailyReminder = (rule.date == nil && rule.oneOff == false)
-
-            // All five candidates already passed — this only means the prompt is overdue
-            // (not that it's too far in the future to schedule yet) when `target` itself
-            // is in the past. Without a catch-up here, a target missed by more than ~30
-            // minutes (e.g. app wasn't opened) would get zero notifications for the whole
-            // cycle, mirroring the rolling overdue cadence used below for date/weekday-only
-            // prompts instead of going silent.
-            guard !isSelfRollingDailyReminder, now > target else {
-                #if DEBUG
-                print("SPS: '\(prompt.text)' time-window produced no dates; skipping catch-up (selfRolling=\(isSelfRollingDailyReminder))")
-                #endif
-                return []
-            }
-
-            var overdueResults: [Date] = []
-            var cursor = minimumFireDate
-            while cursor < horizon && overdueResults.count < cap {
-                overdueResults.append(cursor)
-                cursor = cursor.addingTimeInterval(jitteredInterval(from: overdueInterval))
-            }
-
-            #if DEBUG
-            print("SPS: '\(prompt.text)' time-window overdue catch-up fire dates: \(overdueResults)")
-            #endif
-            return overdueResults
-        }
-
-        // Weekday-only prompts (no explicit time), e.g. "Every Monday": unlike yearly/monthly
-        // lead-ins, the target is at most a week out, so a multi-day countdown ramp would fire
-        // on every day leading up to the target instead of just on the target weekday itself.
-        // Queue a single fire date anchored on the target day — this still gets queued with
-        // iOS as soon as the app is opened any day that week, but it only *fires* on target day.
-        if rule.recurrenceKind == .weekly {
-            let minimumFireDate = now.addingTimeInterval(immediateLeadSeconds)
-
-            // `target` here is end-of-day (see `PromptRule.targetDate`'s no-time fallback) —
-            // a placeholder for date-math purposes, not a time anyone wants a notification
-            // at. The global quiet-hours window can never include 23:59 (its latest
-            // selectable hour is 23, checked with `<`), so firing at raw `target` gets
-            // silently dropped by `isQuietHour` every single week. Anchor the real push to
-            // the day's earliest-reminder hour instead so a day-only weekly prompt (e.g.
-            // "every Wednesday", no time) actually reaches the user.
-            let anchoredTarget = cal.date(bySettingHour: dayStartHour, minute: 0, second: 0, of: target) ?? target
-            let fireDate = max(anchoredTarget, minimumFireDate)
-
-            guard fireDate <= horizon else {
-                #if DEBUG
-                print("SPS: '\(prompt.text)' weekday-only target outside horizon, skipping")
-                #endif
-                return []
-            }
-
-            #if DEBUG
-            print("SPS: '\(prompt.text)' weekday-only fire date: \(fireDate)")
-            #endif
-            return [fireDate]
-        }
-
-        // Date-only prompts: use the rolling lead-in cadence.
-        let leadInStart = rule.leadInStart(for: target, now: now, calendar: cal)
-
-        // Not yet within the lead-in window — nothing to schedule. Most recurrence kinds
-        // relied on their short 24h horizon to make this a no-op automatically, but yearly's
-        // extended horizon reaches leadInStart regardless, so it needs this check explicitly.
-        guard now >= leadInStart else {
-            #if DEBUG
-            print("SPS: '\(prompt.text)' not yet within lead-in window (starts \(leadInStart))")
-            #endif
-            return []
-        }
-
-        let start = max(now, leadInStart)
-
-        #if DEBUG
-        print("SPS: '\(prompt.text)' generation start=\(start) | target=\(target) | horizon=\(horizon)")
-        #endif
-
-        guard start < horizon else {
-            #if DEBUG
-            print("SPS: '\(prompt.text)' start is outside horizon, skipping")
-            #endif
-            return []
-        }
-
-        let cap = rule.recurrenceKind == .yearly ? maxNotificationsPerYearlyPrompt : maxNotificationsPerPrompt
-        // Generate the full ramp, then thin it to `cap` below. Stopping at `cap` while
-        // generating (as this used to) bunches every fire at the start of the lead-in now
-        // that monthly/fortnightly horizons reach the target, leaving the day itself empty.
-        let generationLimit = 500
-
-        var results: [Date] = []
-        let minimumFireDate = now.addingTimeInterval(immediateLeadSeconds)
-
-        let secondsToTarget = target.timeIntervalSince(now)
-        let shouldFireImmediately = (secondsToTarget <= immediateWindow)
-
-        if shouldFireImmediately {
-            let first = min(max(minimumFireDate, start), horizon)
-            results.append(first)
-
-            #if DEBUG
-            print("SPS: '\(prompt.text)' target is near/immediate (\(secondsToTarget)s), forcing first fire at \(first)")
-            #endif
-        }
-
-        var cursor = results.last ?? start
-
-        while cursor < horizon && results.count < generationLimit {
-            let baseInterval = cadence(for: cursor, target: target, recurrenceKind: rule.recurrenceKind)
-            let jittered = jitteredInterval(from: baseInterval)
-
-            var next = cursor.addingTimeInterval(jittered)
-
-            if next < minimumFireDate {
-                next = minimumFireDate
-            }
-
-            if next > horizon {
-                break
-            }
-
-            if let last = results.last, next <= last {
-                next = last.addingTimeInterval(60)
-            }
-
-            if next > horizon {
-                break
-            }
-
-            results.append(next)
-            cursor = next
-        }
-
-        results = evenlyThinned(results, to: cap)
-
-        #if DEBUG
-        if results.isEmpty {
-            print("SPS: '\(prompt.text)' -> generated no fire dates")
-        } else {
-            for d in results {
-                print("SPS: '\(prompt.text)' -> fire date \(d)")
-            }
-        }
-        #endif
-
-        return results
-    }
-
-    /// True for the -30/-15/on-time nudges of a timed prompt — see `approachWindow`.
-    static func isApproachNudge(fireDate: Date, target: Date) -> Bool {
-        let lead = target.timeIntervalSince(fireDate)
-        return lead >= 0 && lead <= approachWindow
-    }
-
-    /// One reminder per day from the lead-in start up to the day before `target`, at the
-    /// prompt's own time — or at `dayStartHour` when that time falls outside the global
-    /// reminder window, so a 9pm bin night still gets its run-up instead of every lead-in
-    /// fire being dropped by the quiet-hours filter.
-    private func leadInDailyFireDates(
-        rule: PromptRule,
-        target: Date,
-        now: Date,
-        minimumFireDate: Date,
-        calendar cal: Calendar,
-        dayStartHour: Int,
-        dayEndHour: Int
-    ) -> [Date] {
-        guard let h = rule.timeHour, let m = rule.timeMinute else { return [] }
-
-        let withinWindow: Bool
-        if dayStartHour == dayEndHour {
-            withinWindow = true
-        } else if dayStartHour < dayEndHour {
-            withinWindow = h >= dayStartHour && h < dayEndHour
-        } else {
-            withinWindow = h >= dayStartHour || h < dayEndHour
-        }
-        let (fireHour, fireMinute) = withinWindow ? (h, m) : (dayStartHour, 0)
-
-        let targetDay = cal.startOfDay(for: target)
-        var day = cal.startOfDay(for: max(now, rule.leadInStart(for: target, now: now, calendar: cal)))
-        var results: [Date] = []
-
-        while day < targetDay {
-            if let fire = cal.date(bySettingHour: fireHour, minute: fireMinute, second: 0, of: day),
-               fire >= minimumFireDate {
-                results.append(fire)
-            }
-            guard let nextDay = cal.date(byAdding: .day, value: 1, to: day) else { break }
-            day = nextDay
-        }
-        return results
-    }
-
-    /// Picks `cap` dates spread evenly across `dates`, always keeping the first and last,
-    /// so a long lead-in keeps reminders right up to the target instead of front-loading.
-    func evenlyThinned(_ dates: [Date], to cap: Int) -> [Date] {
-        guard dates.count > cap else { return dates }
-        guard cap > 1 else { return Array(dates.suffix(max(cap, 0))) }
-        let step = Double(dates.count - 1) / Double(cap - 1)
-        return (0..<cap).map { dates[Int((Double($0) * step).rounded())] }
-    }
-
-    private func cadence(for date: Date, target: Date, recurrenceKind: PromptRecurrenceKind) -> TimeInterval {
-        if date >= target {
-            return overdueInterval
-        }
-
-        let hours = target.timeIntervalSince(date) / 3600
-
-        if recurrenceKind == .yearly {
-            return yearlyCadence(hoursRemaining: hours)
-        }
-
-        let maxCadence = TimeInterval(max(RandomPromptRules().intervalMinutes, 5) * 60)
-
-        switch hours {
-        case let h where h > 24 * 14:
-            return 24 * 60 * 60
-        case let h where h > 24 * 7:
-            return 12 * 60 * 60
-        case let h where h > 24 * 3:
-            return 8 * 60 * 60
-        case let h where h > 24:
-            return 4 * 60 * 60
-        case let h where h > 6:
-            return 2 * 60 * 60
-        case let h where h > 1:
-            return 60 * 60
-        default:
-            return maxCadence
-        }
-    }
-
-    /// Once a day from the 30-day lead-in down to 10 days out, then ramping up as the date
-    /// approaches: twice a day (10-4 days out), four times a day (4-1 days out), and six
-    /// times a day on the final day itself.
-    private func yearlyCadence(hoursRemaining hours: Double) -> TimeInterval {
-        switch hours {
-        case let h where h > 24 * 10:
-            return 24 * 60 * 60
-        case let h where h > 24 * 4:
-            return 12 * 60 * 60
-        case let h where h > 24:
-            return 6 * 60 * 60
-        default:
-            return 4 * 60 * 60
-        }
-    }
-
-    private func jitteredInterval(from base: TimeInterval) -> TimeInterval {
-        let lower = base * 0.85
-        let upper = base * 1.15
-        return Double.random(in: lower...upper)
-    }
-
-    private func endOfRecurringWindow(
-        for target: Date,
-        rule: PromptRule,
-        calendar cal: Calendar
-    ) -> Date {
-        switch rule.recurrenceKind {
-        case .weekly:
-            if rule.timeHour != nil, rule.timeMinute != nil {
-                return target.addingTimeInterval(24 * 60 * 60)
-            } else {
-                return cal.startOfDay(for: target).addingTimeInterval(24 * 60 * 60)
-            }
-
-        case .monthly, .yearly, .fortnightly:
-            if rule.timeHour != nil, rule.timeMinute != nil {
-                return target.addingTimeInterval(24 * 60 * 60)
-            } else {
-                return cal.startOfDay(for: target).addingTimeInterval(24 * 60 * 60)
-            }
-
-        case .oneOff, .none:
-            return target
-        }
-    }
-
-    private func notificationID(for promptID: UUID, fireDate: Date, index: Int) -> String {
-        let ts = Int(fireDate.timeIntervalSince1970)
-        return "\(idPrefix)\(promptID.uuidString)-\(ts)-\(index)"
     }
 
     private func finishRefresh() {
@@ -844,36 +245,255 @@ final class ScheduledPromptScheduler {
         refreshLock.unlock()
     }
 
-    // MARK: - Debug helper
+    // MARK: - Planning (pure — no iOS calls, unit-tested)
 
-    #if DEBUG
-    func dumpPendingScheduledNotifications() {
-        UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
-            let sched = requests
-                .filter { $0.identifier.hasPrefix(self.idPrefix) }
-                .sorted { $0.identifier < $1.identifier }
+    static func plan(
+        prompts: [PromptItem],
+        rules: [String: PromptRule],
+        events: [PromptActionEvent],
+        context: ScheduledPlanContext
+    ) -> [PlannedScheduledNotification] {
+        prompts.flatMap { prompt -> [PlannedScheduledNotification] in
+            guard let rule = rules[prompt.id.uuidString], rule.hasSchedulingRule else { return [] }
+            return planPrompt(prompt, rule: rule, events: events, context: context)
+        }
+    }
 
-            print("SPS: pending sched-* request count = \(sched.count)")
+    /// Orders by importance and trims to `cap`:
+    /// 1. every primary alert, whatever the category or how far off (each prompt has at
+    ///    most three, so these can't swamp the budget — and they're the promise that a
+    ///    reminder arrives when it was set for, even if the app isn't opened in between)
+    /// 2. run-up nudges in the next 24h
+    /// 3. other extras in the next 24h, then 4. everything else — soonest first within each.
+    static func prioritised(
+        _ planned: [PlannedScheduledNotification],
+        now: Date,
+        cap: Int
+    ) -> [PlannedScheduledNotification] {
+        func tier(_ p: PlannedScheduledNotification) -> Int {
+            let soon = p.fireDate.timeIntervalSince(now) <= 24 * 3600
+            switch p.kind {
+            case .primary: return 0
+            case .approach: return soon ? 1 : 3
+            case .followUp, .leadIn, .overdue: return soon ? 2 : 3
+            }
+        }
+        return Array(
+            planned
+                .sorted { a, b in
+                    let ta = tier(a), tb = tier(b)
+                    return ta != tb ? ta < tb : a.fireDate < b.fireDate
+                }
+                .prefix(cap)
+        )
+    }
 
-            for req in sched {
-                if let trigger = req.trigger as? UNCalendarNotificationTrigger {
-                    print("SPS: pending id=\(req.identifier) | dateComponents=\(trigger.dateComponents) | title=\(req.content.title)")
-                } else {
-                    print("SPS: pending id=\(req.identifier) | title=\(req.content.title)")
+    static func planPrompt(
+        _ prompt: PromptItem,
+        rule: PromptRule,
+        events: [PromptActionEvent],
+        context ctx: ScheduledPlanContext
+    ) -> [PlannedScheduledNotification] {
+        let cal = ctx.calendar
+        let now = ctx.now
+        let earliest = now.addingTimeInterval(minimumLead)
+        let kind = rule.recurrenceKind
+        let category = ctx.categoryOf[prompt.id]
+        let timed = rule.timeHour != nil && rule.timeMinute != nil
+
+        func settled(_ occurrence: Date) -> Bool {
+            let start = rule.cycleStart(for: occurrence, now: now, calendar: cal)
+            return events.contains { $0.promptID == prompt.id && $0.occurredAt >= start }
+        }
+        func allowed(_ date: Date) -> Bool {
+            !isQuiet(date, category: category, context: ctx)
+        }
+
+        var out: [PlannedScheduledNotification] = []
+        func add(_ k: PlannedScheduledNotification.Kind, _ occurrence: Date, _ fire: Date, repeating: DateComponents? = nil) {
+            out.append(PlannedScheduledNotification(
+                promptID: prompt.id, promptText: prompt.text, kind: k,
+                occurrence: occurrence, fireDate: fire, repeating: repeating
+            ))
+        }
+
+        // --- A one-off whose time has passed without Done/Skip -------------------------
+        if kind == .oneOff, let missed = rule.previousTarget(before: now, calendar: cal), !settled(missed) {
+            if timed {
+                for minutes in [15.0, 30.0] {
+                    let fire = missed.addingTimeInterval(minutes * 60)
+                    if fire >= earliest, allowed(fire) { add(.followUp, missed, fire) }
+                }
+            }
+            let graceOver = timed ? now > missed.addingTimeInterval(approachWindow) : true
+            if graceOver {
+                var cursor = now.addingTimeInterval(overdueFirstDelay)
+                var count = 0
+                let end = now.addingTimeInterval(24 * 3600)
+                while cursor < end && count < maxOverdueNags {
+                    if allowed(cursor) { add(.overdue, missed, cursor); count += 1 }
+                    cursor = cursor.addingTimeInterval(overdueInterval)
+                }
+            }
+            return out
+        }
+
+        // --- A timed recurring occurrence that passed under 30 min ago -----------------
+        // Keeps its +15/+30 follow-ups instead of losing them to the roll-forward.
+        if timed, kind != .oneOff,
+           let previous = rule.previousTarget(before: now, calendar: cal),
+           now.timeIntervalSince(previous) <= approachWindow,
+           !settled(previous) {
+            for minutes in [15.0, 30.0] {
+                let fire = previous.addingTimeInterval(minutes * 60)
+                if fire >= earliest, allowed(fire) { add(.followUp, previous, fire) }
+            }
+        }
+
+        // --- Upcoming occurrences -------------------------------------------------------
+        let maxOccurrences: Int
+        switch kind {
+        case .daily: maxOccurrences = 3
+        case .weekly, .fortnightly, .monthly: maxOccurrences = 2
+        default: maxOccurrences = 1
+        }
+
+        let trueNext = rule.nextTarget(after: now, calendar: cal)
+        var occurrences: [Date] = []
+        var cursor = now
+        for _ in 0..<(maxOccurrences + 1) {
+            guard occurrences.count < maxOccurrences,
+                  let next = rule.nextTarget(after: cursor, calendar: cal),
+                  next.timeIntervalSince(now) <= occurrenceHorizon
+            else { break }
+            if !settled(next) { occurrences.append(next) }
+            if kind == .oneOff { break }
+            cursor = next.addingTimeInterval(1)
+        }
+
+        // Daily / weekly: one repeating trigger covers this and every later occurrence —
+        // unless the next one is already Done/Skipped (e.g. Friday's ticked off on
+        // Wednesday), since a repeating trigger can't skip a single date. Then the later
+        // occurrences get one-off primaries until the next re-plan.
+        var repeatingComps: DateComponents?
+        if (kind == .daily || kind == .weekly), let first = occurrences.first, first == trueNext {
+            let primaryTime = primaryFireDate(for: first, rule: rule, category: category, context: ctx)
+            var comps = DateComponents()
+            if kind == .weekly { comps.weekday = rule.weekday }
+            comps.hour = cal.component(.hour, from: primaryTime)
+            comps.minute = cal.component(.minute, from: primaryTime)
+            repeatingComps = comps
+            let nextFire = cal.nextDate(after: now, matching: comps, matchingPolicy: .nextTime) ?? primaryTime
+            add(.primary, first, nextFire, repeating: comps)
+        }
+
+        for (index, occurrence) in occurrences.enumerated() {
+            let primary = primaryFireDate(for: occurrence, rule: rule, category: category, context: ctx)
+
+            if repeatingComps == nil, primary >= earliest {
+                add(.primary, occurrence, primary)
+            }
+
+            if timed {
+                for minutes in [-30.0, -15.0] {
+                    let fire = occurrence.addingTimeInterval(minutes * 60)
+                    if fire >= earliest, allowed(fire) { add(.approach, occurrence, fire) }
+                }
+                for minutes in [15.0, 30.0] {
+                    let fire = occurrence.addingTimeInterval(minutes * 60)
+                    if fire >= earliest, allowed(fire) { add(.followUp, occurrence, fire) }
+                }
+            } else {
+                // Day-only: a few more reminders through the rest of that day.
+                for hours in [4.0, 8.0, 12.0] {
+                    let fire = primary.addingTimeInterval(hours * 3600)
+                    if fire >= earliest, cal.isDate(fire, inSameDayAs: occurrence), allowed(fire) {
+                        add(.followUp, occurrence, fire)
+                    }
+                }
+            }
+
+            // Lead-in days before the next dated occurrence only.
+            if index == 0, rule.hasDatedLeadIn {
+                for daysBefore in leadInDays(for: kind) {
+                    guard let day = cal.date(byAdding: .day, value: -daysBefore, to: cal.startOfDay(for: occurrence)) else { continue }
+                    let fire = leadInFireDate(on: day, rule: rule, category: category, context: ctx)
+                    if fire >= earliest { add(.leadIn, occurrence, fire) }
                 }
             }
         }
+
+        return out
     }
-    #endif
-}
 
-// MARK: - Supporting type
+    /// Days before the date to remind on. Birthdays/one-off dates get a long runway that
+    /// tightens to daily in the final week; monthly/fortnightly get the final five days.
+    static func leadInDays(for kind: PromptRecurrenceKind) -> [Int] {
+        switch kind {
+        case .yearly, .oneOff: return [30, 21, 14, 7, 6, 5, 4, 3, 2, 1]
+        case .monthly, .fortnightly: return [5, 4, 3, 2, 1]
+        default: return []
+        }
+    }
 
-private struct PendingScheduledNotification {
-    let id: String
-    let title: String
-    let subtitle: String
-    let fireDate: Date
-    let userInfo: [AnyHashable: Any]
-    let isApproach: Bool
+    // MARK: - Times of day
+
+    /// The set time if there is one (quiet hours never move or drop it); otherwise the
+    /// first hour that day the prompt's category isn't quiet, within the global window.
+    static func primaryFireDate(
+        for occurrence: Date,
+        rule: PromptRule,
+        category: PromptCategory?,
+        context ctx: ScheduledPlanContext
+    ) -> Date {
+        if rule.timeHour != nil, rule.timeMinute != nil { return occurrence }
+        return firstAllowedTime(on: occurrence, category: category, context: ctx)
+    }
+
+    /// Lead-in reminders go out at the prompt's own time when that's allowed, otherwise
+    /// at the first allowed hour of the day (so a 9pm bin night still gets a run-up).
+    private static func leadInFireDate(
+        on day: Date,
+        rule: PromptRule,
+        category: PromptCategory?,
+        context ctx: ScheduledPlanContext
+    ) -> Date {
+        if let h = rule.timeHour, let m = rule.timeMinute,
+           let atTime = ctx.calendar.date(bySettingHour: h, minute: m, second: 0, of: day),
+           !isQuiet(atTime, category: category, context: ctx) {
+            return atTime
+        }
+        return firstAllowedTime(on: day, category: category, context: ctx)
+    }
+
+    private static func firstAllowedTime(on day: Date, category: PromptCategory?, context ctx: ScheduledPlanContext) -> Date {
+        let cal = ctx.calendar
+        let startHour = ctx.dayStartHour == ctx.dayEndHour ? 9 : ctx.dayStartHour
+        for offset in 0..<24 {
+            let hour = startHour + offset
+            guard hour < 24 else { break }
+            if let candidate = cal.date(bySettingHour: hour, minute: 0, second: 0, of: day),
+               !isQuiet(candidate, category: category, context: ctx) {
+                return candidate
+            }
+        }
+        // Every hour that day is quiet (e.g. a Work prompt the user put on a Saturday):
+        // they still chose that day, so remind at the start of it.
+        return cal.date(bySettingHour: startHour, minute: 0, second: 0, of: day) ?? day
+    }
+
+    /// Global earliest/latest window plus the prompt category's own quiet window — the
+    /// same rules `RandomPromptScheduler` applies to the random feed.
+    static func isQuiet(_ date: Date, category: PromptCategory?, context ctx: ScheduledPlanContext) -> Bool {
+        let cal = ctx.calendar
+        if let category, let window = ctx.categoryQuietWindows[category], window.isQuiet(at: date, cal: cal) {
+            return true
+        }
+        guard ctx.dayStartHour != ctx.dayEndHour else { return false }
+        let hour = cal.component(.hour, from: date)
+        let inside = ctx.dayStartHour < ctx.dayEndHour
+            ? (hour >= ctx.dayStartHour && hour < ctx.dayEndHour)
+            : (hour >= ctx.dayStartHour || hour < ctx.dayEndHour)
+        return !inside
+    }
 }

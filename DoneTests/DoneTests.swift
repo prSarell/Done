@@ -133,102 +133,187 @@ struct DoneTests {
         ).isEmpty)
     }
 
-    // MARK: - Lead-in for dated prompts
+    // MARK: - Scheduled prompts: every category gets its alert
     //
-    // These guard the fix for birthdays/bin night going silent until the day itself:
-    // a dated prompt *with a time* skipped the lead-in ramp entirely, and monthly/
-    // fortnightly prompts only planned 24h ahead, so nothing reached iOS unless the
-    // app was opened the day before.
+    // These pin a fixed "now" (Wednesday 4 Nov 2026, 10:00) so they don't depend on the
+    // day they run. Quiet hours mirror the app defaults: 7am–8pm globally, and Work
+    // quiet 5pm–9am plus weekends.
+
+    private let cal = Calendar.current
+
+    private func at(_ day: Int, _ hour: Int, _ minute: Int = 0, month: Int = 11) -> Date {
+        cal.date(from: DateComponents(year: 2026, month: month, day: day, hour: hour, minute: minute))!
+    }
+
+    private var wednesday10am: Date { at(4, 10) }
 
     private func day(_ offset: Int, at hour: Int, from base: Date) -> Date {
-        let cal = Calendar.current
         let d = cal.date(byAdding: .day, value: offset, to: base)!
         return cal.date(bySettingHour: hour, minute: 0, second: 0, of: d)!
     }
+    private let friday = 6 // Calendar weekday: 1 = Sunday … 7 = Saturday
 
-    @Test func yearlyPromptWithTimeRemindsBeforeTheDay() {
-        let cal = Calendar.current
-        let now = todayAt(10)
-        let birthday = day(14, at: 0, from: now)
-        let comps = cal.dateComponents([.month, .day], from: birthday)
-        let rule = PromptRule(timeHour: 9, timeMinute: 0, oneOff: false, month: comps.month, day: comps.day)
-        let sps = ScheduledPromptScheduler.shared
-
-        let target = rule.nextTarget(after: now)!
-        let dates = sps.generateFireDates(
-            for: PromptItem(text: "Tom's birthday"), rule: rule, target: target, now: now,
-            horizon: sps.horizon(for: rule, target: target, now: now),
-            calendar: cal, dayStartHour: 9, dayEndHour: 20
+    private func context(now: Date, prompt: PromptItem, category: PromptCategory = .daily) -> ScheduledPlanContext {
+        ScheduledPlanContext(
+            now: now, calendar: cal, dayStartHour: 7, dayEndHour: 20,
+            categoryQuietWindows: [.work: CategoryQuietWindow(startHour: 17, endHour: 9, weekendsQuiet: true)],
+            categoryPromptIDs: [category: [prompt.id]]
         )
-
-        let daysBefore = Set(dates.filter { $0 < cal.startOfDay(for: target) }.map { cal.startOfDay(for: $0) })
-        #expect(daysBefore.count >= 13)
-        #expect(dates.contains { cal.isDate($0, inSameDayAs: target) })
     }
 
-    @Test func fortnightlyPromptIsQueuedDaysAheadEvenAtANightTime() {
-        let cal = Calendar.current
-        let now = todayAt(10)
-        let binNight = day(4, at: 0, from: now)
-        // 9pm sits outside the 9-20 reminder window, so lead-in days move to 9am.
-        let rule = PromptRule(timeHour: 21, timeMinute: 0, oneOff: false, fortnightlyAnchorDate: binNight)
-        let sps = ScheduledPromptScheduler.shared
-
-        let target = rule.nextTarget(after: now)!
-        let horizon = sps.horizon(for: rule, target: target, now: now)
-        #expect(horizon > target)
-
-        let dates = sps.generateFireDates(
-            for: PromptItem(text: "Bin night"), rule: rule, target: target, now: now,
-            horizon: horizon, calendar: cal, dayStartHour: 9, dayEndHour: 20
-        )
-        let leadIn = dates.filter { $0 < cal.startOfDay(for: target) }
-        #expect(!leadIn.isEmpty)
-        #expect(leadIn.allSatisfy { cal.component(.hour, from: $0) == 9 })
-        #expect(leadIn.contains { cal.isDate($0, inSameDayAs: day(-1, at: 9, from: target)) })
+    private func plan(_ rule: PromptRule, now: Date, category: PromptCategory = .daily,
+                      events: [PromptActionEvent] = [], text: String = "Prompt") -> [PlannedScheduledNotification] {
+        let prompt = PromptItem(text: text)
+        let events = events.map { PromptActionEvent(promptID: prompt.id, promptText: text, action: $0.action, occurredAt: $0.occurredAt) }
+        return ScheduledPromptScheduler.planPrompt(prompt, rule: rule, events: events,
+                                                   context: context(now: now, prompt: prompt, category: category))
     }
 
-    @Test func weeklyPromptWithTimeStillOnlyFiresOnItsDay() {
-        let cal = Calendar.current
-        let now = todayAt(10)
-        let wd = cal.component(.weekday, from: day(3, at: 0, from: now))
-        let rule = PromptRule(timeHour: 19, timeMinute: 0, weekday: wd, oneOff: false)
-        let sps = ScheduledPromptScheduler.shared
+    private func done(at date: Date) -> PromptActionEvent {
+        PromptActionEvent(promptID: UUID(), promptText: "", action: .done, occurredAt: date)
+    }
 
-        let target = rule.nextTarget(after: now)!
-        let dates = sps.generateFireDates(
-            for: PromptItem(text: "Gym"), rule: rule, target: target, now: now,
-            horizon: sps.horizon(for: rule, target: target, now: now),
-            calendar: cal, dayStartHour: 9, dayEndHour: 20
-        )
-        #expect(!dates.isEmpty)
-        #expect(dates.allSatisfy { cal.isDate($0, inSameDayAs: target) })
+    @Test func weeklyFridayWithNoTimeIsARepeatingAlertOnFriday() {
+        let planned = plan(PromptRule(weekday: friday, oneOff: false), now: wednesday10am)
+        let primary = planned.filter { $0.kind == .primary }
+
+        #expect(primary.count == 1)
+        #expect(primary[0].repeating == DateComponents(hour: 7, minute: 0, weekday: friday))
+        #expect(primary[0].fireDate == at(6, 7))
+        // Nothing on Wednesday or Thursday.
+        #expect(planned.allSatisfy { cal.component(.weekday, from: $0.fireDate) == friday })
+    }
+
+    @Test func weeklyFridayAt9pmIsNotSilencedByQuietHours() {
+        let planned = plan(PromptRule(timeHour: 21, timeMinute: 0, weekday: friday, oneOff: false), now: wednesday10am)
+        let primary = planned.first { $0.kind == .primary }
+        #expect(primary?.fireDate == at(6, 21))
+        #expect(primary?.repeating?.hour == 21)
+        // The extra nudges around it do respect the 8pm cut-off.
+        #expect(!planned.contains { $0.kind == .approach })
+    }
+
+    @Test func workPromptAfterFivePmStillGetsItsAlert() {
+        let planned = plan(PromptRule(timeHour: 17, timeMinute: 30, weekday: friday, oneOff: false),
+                           now: wednesday10am, category: .work)
+        #expect(planned.contains { $0.kind == .primary && $0.fireDate == at(6, 17, 30) })
+        #expect(!planned.contains { $0.kind == .approach })
+    }
+
+    @Test func workDayOnlyPromptAvoidsWorksQuietMorning() {
+        // Work is quiet until 9am, so a day-only Work prompt goes out at 9, not 7.
+        let planned = plan(PromptRule(weekday: friday, oneOff: false), now: wednesday10am, category: .work)
+        #expect(planned.first { $0.kind == .primary }?.fireDate == at(6, 9))
+    }
+
+    @Test func dailyReminderRepeatsSoItArrivesWithoutOpeningTheApp() {
+        let rule = PromptRule(timeHour: 8, timeMinute: 0, oneOff: false)
+        #expect(rule.recurrenceKind == .daily)
+        #expect(rule.hasSchedulingRule)
+
+        let planned = plan(rule, now: wednesday10am)
+        let primary = planned.filter { $0.kind == .primary }
+        #expect(primary.count == 1)
+        #expect(primary[0].repeating == DateComponents(hour: 8, minute: 0))
+        #expect(primary[0].fireDate == at(5, 8))
+    }
+
+    @Test func dailyReminderDoneEarlyStillQueuesTheNextDays() {
+        // Done at 7:30 for today's 8am: today's alert must not fire, tomorrow's must.
+        let rule = PromptRule(timeHour: 8, timeMinute: 0, oneOff: false)
+        let planned = plan(rule, now: at(4, 7, 40), events: [done(at: at(4, 7, 30))])
+        let primaries = planned.filter { $0.kind == .primary }
+
+        #expect(primaries.allSatisfy { $0.repeating == nil })
+        #expect(primaries.map(\.fireDate) == [at(5, 8), at(6, 8), at(7, 8)])
+        #expect(!planned.contains { cal.isDate($0.fireDate, inSameDayAs: at(4, 0)) })
+    }
+
+    @Test func onceOnFridayWithNoTimeOnlyRemindsOnFriday() {
+        let planned = plan(PromptRule(weekday: friday, oneOff: true), now: wednesday10am)
+        #expect(planned.contains { $0.kind == .primary && $0.fireDate == at(6, 7) })
+        #expect(planned.allSatisfy { cal.isDate($0.fireDate, inSameDayAs: at(6, 0)) })
+        #expect(planned.allSatisfy { cal.component(.hour, from: $0.fireDate) < 20 })
+    }
+
+    @Test func monthlyDateOnlyPromptAlertsOnTheDayAndTheDaysBefore() {
+        let planned = plan(PromptRule(oneOff: false, monthlyDay: 9), now: wednesday10am)
+        #expect(planned.contains { $0.kind == .primary && $0.fireDate == at(9, 7) })
+        let leadIns = planned.filter { $0.kind == .leadIn }.map(\.fireDate)
+        #expect(leadIns.contains(at(8, 7)))
+        #expect(leadIns.allSatisfy { cal.component(.hour, from: $0) == 7 })
+        #expect(planned.allSatisfy { cal.component(.hour, from: $0.fireDate) < 20 })
+    }
+
+    @Test func yearlyBirthdayAtNineRampsUpOverTheFortnightBefore() {
+        let planned = plan(PromptRule(timeHour: 9, timeMinute: 0, oneOff: false, month: 11, day: 18), now: wednesday10am)
+        #expect(planned.contains { $0.kind == .primary && $0.fireDate == at(18, 9) })
+        let leadInDays = Set(planned.filter { $0.kind == .leadIn }.map { cal.component(.day, from: $0.fireDate) })
+        // 14 days before is today (already past 9am); 7…1 days before are all there.
+        #expect(leadInDays == [11, 12, 13, 14, 15, 16, 17])
+    }
+
+    @Test func fortnightlyBinNightAt9pmGetsItsRunUpInTheMorning() {
+        let planned = plan(PromptRule(timeHour: 21, timeMinute: 0, oneOff: false, fortnightlyAnchorDate: at(6, 0)),
+                           now: wednesday10am)
+        #expect(planned.contains { $0.kind == .primary && $0.fireDate == at(6, 21) })
+        let leadIns = planned.filter { $0.kind == .leadIn }.map(\.fireDate)
+        #expect(leadIns.contains(at(5, 7)))
+        #expect(leadIns.allSatisfy { cal.component(.hour, from: $0) == 7 })
     }
 
     @Test func timedAppointmentNudgesInTheRunUpAndOnTheTime() {
-        let cal = Calendar.current
-        let now = todayAt(9)
-        let appointment = todayAt(15)
-        let rule = PromptRule(timeHour: 15, timeMinute: 0, date: cal.startOfDay(for: now), oneOff: true)
-        let sps = ScheduledPromptScheduler.shared
-
-        let dates = sps.generateFireDates(
-            for: PromptItem(text: "Peter Pan"), rule: rule, target: appointment, now: now,
-            horizon: sps.horizon(for: rule, target: appointment, now: now),
-            calendar: cal, dayStartHour: 7, dayEndHour: 22
-        )
-        let approach = dates.filter { ScheduledPromptScheduler.isApproachNudge(fireDate: $0, target: appointment) }
-        #expect(approach == [-30, -15, 0].map { appointment.addingTimeInterval(Double($0) * 60) })
-        #expect(!ScheduledPromptScheduler.isApproachNudge(fireDate: appointment.addingTimeInterval(15 * 60), target: appointment))
+        let rule = PromptRule(timeHour: 15, timeMinute: 0, date: at(4, 0), oneOff: true)
+        let planned = plan(rule, now: wednesday10am)
+        #expect(planned.filter { $0.kind == .approach }.map(\.fireDate).sorted() == [at(4, 14, 30), at(4, 14, 45)])
+        #expect(planned.contains { $0.kind == .primary && $0.fireDate == at(4, 15) })
+        #expect(planned.filter { $0.kind == .followUp }.map(\.fireDate).sorted() == [at(4, 15, 15), at(4, 15, 30)])
     }
 
-    @Test func thinningKeepsBothEndsAndRespectsCap() {
-        let base = Date()
-        let dates = (0..<100).map { base.addingTimeInterval(Double($0) * 3600) }
-        let thinned = ScheduledPromptScheduler.shared.evenlyThinned(dates, to: 6)
-        #expect(thinned.count == 6)
-        #expect(thinned.first == dates.first)
-        #expect(thinned.last == dates.last)
+    @Test func missedOneOffNagsLaterNotEveryTimeTheAppIsTouched() {
+        let rule = PromptRule(timeHour: 8, timeMinute: 0, oneOff: true)
+        let planned = plan(rule, now: wednesday10am)
+        let overdue = planned.filter { $0.kind == .overdue }
+        #expect(!overdue.isEmpty)
+        #expect(overdue.allSatisfy { $0.fireDate >= wednesday10am.addingTimeInterval(3600) })
+    }
+
+    @Test func weeklyJustPassedKeepsItsFollowUps() {
+        // 6:10pm Friday, the 6pm reminder fired 10 minutes ago and hasn't been ticked off.
+        let planned = plan(PromptRule(timeHour: 18, timeMinute: 0, weekday: friday, oneOff: false), now: at(6, 18, 10))
+        #expect(planned.filter { $0.kind == .followUp }.map(\.fireDate).contains(at(6, 18, 15)))
+        #expect(planned.contains { $0.kind == .primary && $0.repeating != nil })
+    }
+
+    @Test func busyDailyListCannotCrowdOutAnotherCategorysAlert() {
+        // 15 daily set-time reminders (4-5 nudges each) used to fill every slot.
+        let now = wednesday10am
+        var prompts: [PromptItem] = []
+        var rules: [String: PromptRule] = [:]
+        for i in 0..<15 {
+            let p = PromptItem(text: "Daily \(i)")
+            prompts.append(p)
+            rules[p.id.uuidString] = PromptRule(timeHour: 11 + i % 8, timeMinute: i, oneOff: false)
+        }
+        let bins = PromptItem(text: "Bins")
+        let birthday = PromptItem(text: "Birthday")
+        prompts += [bins, birthday]
+        rules[bins.id.uuidString] = PromptRule(weekday: friday, oneOff: false)
+        rules[birthday.id.uuidString] = PromptRule(oneOff: false, month: 11, day: 20)
+
+        let ctx = ScheduledPlanContext(now: now, calendar: cal, dayStartHour: 7, dayEndHour: 20)
+        let planned = ScheduledPromptScheduler.plan(prompts: prompts, rules: rules, events: [], context: ctx)
+        #expect(planned.count > ScheduledPromptScheduler.scheduledNotificationCap)
+
+        let kept = ScheduledPromptScheduler.prioritised(planned, now: now, cap: ScheduledPromptScheduler.scheduledNotificationCap)
+        #expect(kept.count == ScheduledPromptScheduler.scheduledNotificationCap)
+        let keptPrimaryIDs = Set(kept.filter { $0.kind == .primary }.map(\.promptID))
+        #expect(keptPrimaryIDs == Set(prompts.map(\.id)))
+    }
+
+    @Test func dailyRuleDescribesItselfAsEveryDay() {
+        #expect(PromptRule(timeHour: 8, timeMinute: 0, oneOff: false).scheduleDescription.hasPrefix("Every day"))
+        #expect(PromptRule(timeHour: 8, timeMinute: 0, oneOff: true).recurrenceKind == .oneOff)
     }
 
     // MARK: - Lock Screen duplicate banners

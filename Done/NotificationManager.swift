@@ -130,6 +130,45 @@ final class NotificationsManager {
         }
     }
 
+    /// Queues a prompt notification and waits until iOS has accepted it, so callers that
+    /// size the shared 64-slot budget (see `RandomPromptScheduler`) count it correctly.
+    /// `repeating` queues a calendar trigger that keeps firing on every match (daily or
+    /// weekly) and costs a single pending slot.
+    func add(
+        id: String,
+        title: String,
+        subtitle: String?,
+        userInfo: [AnyHashable: Any],
+        fireDate: Date,
+        repeating: DateComponents? = nil
+    ) async {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        if let subtitle, !subtitle.isEmpty { content.subtitle = subtitle }
+        content.sound = .default
+        content.userInfo = userInfo
+        content.categoryIdentifier = PromptNotificationDelegate.categoryID
+        if let thread = userInfo[PromptNotificationDelegate.kPromptID] as? String {
+            content.threadIdentifier = thread
+        }
+
+        let trigger: UNCalendarNotificationTrigger
+        if let repeating {
+            trigger = UNCalendarNotificationTrigger(dateMatching: repeating, repeats: true)
+        } else {
+            let comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: fireDate)
+            trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+        }
+
+        do {
+            try await UNUserNotificationCenter.current().add(
+                UNNotificationRequest(identifier: id, content: content, trigger: trigger)
+            )
+        } catch {
+            print("Failed to schedule notification \(id):", error)
+        }
+    }
+
     func scheduleDailySummary(doneCount: Int) {
         let id = "daily-summary-\(Self.dateKey(for: Date()))"
         cancel(id: id)
