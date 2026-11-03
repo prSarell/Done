@@ -1,6 +1,6 @@
 # Done! — Notification Scheduling Reference
 
-_Last updated: 2026-11-03 (scheduler rewrite, uncommitted pending iPhone test)_
+_Last updated: 2026-11-03 (scheduler rewrite committed 99926ff; Banners per Reminder slider added)_
 
 This is the reference for how Done! decides **which notifications fire, when, and for which
 category**. Read it before changing anything in the scheduling code. Most past bugs came from
@@ -135,6 +135,22 @@ No iOS calls, so it's fully unit-tested.
 | `leadIn` | Days before the **next** occurrence of a dated rule, at the rule's time (or first allowed hour if that's quiet) | Same, at first allowed hour | Respected |
 | `overdue` | See step 1 | See step 1 | Respected |
 
+**Banners per Reminder slider** (`banners_per_reminder`, 1–5, default 3) limits the extras per
+occurrence via `extraOffsets(bannersPerReminder:)`. The primary always fires. Extras are added
+closest-to-the-time first:
+
+| Slider | Timed prompt | Day-only prompt | Missed one-off overdue nags |
+|---|---|---|---|
+| 1 | on time | first hour | none |
+| 2 | −15, on time | + 4h | 1 |
+| 3 (default) | −15, on time, +15 | + 4h, 8h | 2 |
+| 4 | −30, −15, on time, +15 | + 4h, 8h, 12h | 3 |
+| 5 | −30, −15, on time, +15, +30 | + 4h, 8h, 12h | 4 |
+
+Lead-in days are **not** affected (they're one banner on each of several days, not repeats on the
+day). Random prompts are always one banner each. `ScheduledPlanContext.bannersPerReminder` defaults
+to 5 so the planner tests describe the full set unless they say otherwise.
+
 Lead-in days (`leadInDays(for:)`): **yearly and dated one-off** → 30, 21, 14, 7, 6, 5, 4, 3, 2, 1
 days before. **Monthly and fortnightly** → 5, 4, 3, 2, 1.
 
@@ -203,7 +219,8 @@ begins. `oneOff == false` always protects a prompt from deletion.
 - Rolling Prompts switch off → cancels pending `rand-*` only. Scheduled prompts still fire.
 
 ### Settings (Settings app → Done!), registered in `DoneApp.init`
-`random_prompts_enabled` (true), `notification_intensity` (0.5), `global_earliest_hour` (7),
+`random_prompts_enabled` (true), `notification_intensity` (0.5), `banners_per_reminder` (3; read via
+`RandomPromptRules.bannersPerReminder` and passed to the scheduled planner), `global_earliest_hour` (7),
 `global_latest_hour` (20), `quiet_<category>_start/_end/_weekends`. Only **Work** has non-zero
 defaults: 17 → 9 plus weekends. Category keys: daily, weekly, work, monthly, yearly, events,
 study, mentalhealth (displayed as "Health"). Defaults in `DoneApp.init` must match the plists by hand.
@@ -223,6 +240,7 @@ The 9pm summary and 8am "done yesterday" update are skipped if their hour falls 
 | 2026-10-22 | 3pm appointment's 2:30/2:45 nudges missing | Soonest-first trim let overdue nags win | Approach nudges prioritised; on-time nudge added |
 | 2026-10-25 | Prompts re-fired after Done/Skip | Removal not committed before iOS suspended the app | `clearNotifications` re-reads until gone; `willPresent` filter |
 | 2026-10-31 | Whole Work list missing from random feed | Bare "Once" counted as scheduled | `hasSchedulingRule` false for bare Once |
+| 2026-11-03 | (feature) Too many banners per prompt, no control | Fixed 5-banner pattern | Banners per Reminder slider (see §4 step 2); **default 3 is fewer than the old 5** |
 | **2026-11-03** | Fixing one category kept breaking another; weekly Friday reminders unreliable | Special cases piling up; see list below | **Planner rewrite** (this document) |
 
 ### What the 2026-11-03 rewrite fixed
@@ -271,7 +289,7 @@ xcodebuild test -scheme Done \
   -only-testing:DoneTests
 ```
 (Destination by simulator **id** for iPhone 16 Pro. Using `name=` failed on this machine.
-`xcrun simctl list devices available` lists the ids.) 27 tests as of 2026-11-03.
+`xcrun simctl list devices available` lists the ids.) 33 tests as of 2026-11-03.
 
 ### Debug console
 DEBUG builds log every planned notification: `SPS:   primary 'Bins' at … (repeating)`, plus

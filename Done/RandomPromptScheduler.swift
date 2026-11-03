@@ -29,6 +29,10 @@ struct RandomPromptRules: Codable {
     // Exact cadence controls
     var intervalMinutes: Int = 20           // 🔸 one notification every 20 minutes
     var jitterMinutes: Int = 2              // small +/- jitter to feel organic
+
+    /// How many banners a scheduled prompt sends for one occurrence (Settings → Done! →
+    /// Banners per Reminder). 1 = just the alert itself; the struct default is the full set.
+    var bannersPerReminder: Int = ScheduledPromptScheduler.maxBannersPerReminder
 }
 
 /// A quiet window for one prompt category: prompts from that category are suppressed
@@ -79,11 +83,19 @@ extension RandomPromptRules {
         rules.intervalMinutes = intervalMinutes(forIntensity: defaults.double(forKey: "notification_intensity"))
         rules.dayStartHour = defaults.integer(forKey: "global_earliest_hour")
         rules.dayEndHour = defaults.integer(forKey: "global_latest_hour")
+        rules.bannersPerReminder = bannersPerReminder(forSlider: defaults.double(forKey: "banners_per_reminder"))
         return rules
     }
 
     /// Piecewise map from the `notification_intensity` slider to minutes between prompts:
     /// cold (0.0) ≈ 60min, default (0.5) ≈ 20min, hot (1.0) ≈ 10min.
+    /// The `banners_per_reminder` slider is continuous (Settings sliders can't snap), so
+    /// round it to a whole number of banners.
+    static func bannersPerReminder(forSlider value: Double) -> Int {
+        let maxBanners = ScheduledPromptScheduler.maxBannersPerReminder
+        return min(max(Int(value.rounded()), 1), maxBanners)
+    }
+
     private static func intervalMinutes(forIntensity intensity: Double) -> Int {
         let clamped = min(max(intensity, 0), 1)
         let minutes = clamped <= 0.5

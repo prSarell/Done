@@ -153,20 +153,23 @@ struct DoneTests {
     }
     private let friday = 6 // Calendar weekday: 1 = Sunday … 7 = Saturday
 
-    private func context(now: Date, prompt: PromptItem, category: PromptCategory = .daily) -> ScheduledPlanContext {
+    private func context(now: Date, prompt: PromptItem, category: PromptCategory = .daily,
+                         banners: Int = ScheduledPromptScheduler.maxBannersPerReminder) -> ScheduledPlanContext {
         ScheduledPlanContext(
             now: now, calendar: cal, dayStartHour: 7, dayEndHour: 20,
             categoryQuietWindows: [.work: CategoryQuietWindow(startHour: 17, endHour: 9, weekendsQuiet: true)],
-            categoryPromptIDs: [category: [prompt.id]]
+            categoryPromptIDs: [category: [prompt.id]],
+            bannersPerReminder: banners
         )
     }
 
     private func plan(_ rule: PromptRule, now: Date, category: PromptCategory = .daily,
-                      events: [PromptActionEvent] = [], text: String = "Prompt") -> [PlannedScheduledNotification] {
+                      events: [PromptActionEvent] = [], text: String = "Prompt",
+                      banners: Int = ScheduledPromptScheduler.maxBannersPerReminder) -> [PlannedScheduledNotification] {
         let prompt = PromptItem(text: text)
         let events = events.map { PromptActionEvent(promptID: prompt.id, promptText: text, action: $0.action, occurredAt: $0.occurredAt) }
         return ScheduledPromptScheduler.planPrompt(prompt, rule: rule, events: events,
-                                                   context: context(now: now, prompt: prompt, category: category))
+                                                   context: context(now: now, prompt: prompt, category: category, banners: banners))
     }
 
     private func done(at date: Date) -> PromptActionEvent {
@@ -390,6 +393,58 @@ struct DoneTests {
         #expect(PromptRule(date: todayAt(0)).isOneOff)             // legacy dated -> Once
         #expect(!PromptRule(weekday: 2).isOneOff)                  // legacy weekly -> Repeat
         #expect(!PromptRule().isOneOff)                            // nothing set -> Repeat
+    }
+
+
+    // MARK: - Banners per Reminder slider
+    //
+    // Settings → Done! → Banners per Reminder (1…5, default 3) limits how many banners one
+    // occurrence of a scheduled prompt sends. Extras are added closest-to-the-time first.
+
+    @Test func bannerSliderRoundsAndClampsToOneThroughFive() {
+        #expect(RandomPromptRules.bannersPerReminder(forSlider: 0) == 1)
+        #expect(RandomPromptRules.bannersPerReminder(forSlider: 1.2) == 1)
+        #expect(RandomPromptRules.bannersPerReminder(forSlider: 3) == 3)
+        #expect(RandomPromptRules.bannersPerReminder(forSlider: 3.6) == 4)
+        #expect(RandomPromptRules.bannersPerReminder(forSlider: 9) == 5)
+    }
+
+    private func timedFireTimes(banners: Int) -> [Date] {
+        let rule = PromptRule(timeHour: 15, timeMinute: 0, weekday: friday, oneOff: false)
+        let planned = plan(rule, now: wednesday10am, banners: banners)
+        // This Friday only (the repeating primary stands for every Friday).
+        return planned.filter { cal.isDate($0.fireDate, inSameDayAs: at(6, 0)) }.map(\.fireDate).sorted()
+    }
+
+    @Test func timedReminderSendsOnlyAsManyBannersAsTheSliderAllows() {
+        #expect(timedFireTimes(banners: 1) == [at(6, 15)])
+        #expect(timedFireTimes(banners: 2) == [at(6, 14, 45), at(6, 15)])
+        #expect(timedFireTimes(banners: 3) == [at(6, 14, 45), at(6, 15), at(6, 15, 15)])
+        #expect(timedFireTimes(banners: 5) == [at(6, 14, 30), at(6, 14, 45), at(6, 15), at(6, 15, 15), at(6, 15, 30)])
+    }
+
+    @Test func dayOnlyReminderFollowUpsFollowTheSlider() {
+        let rule = PromptRule(weekday: friday, oneOff: false)
+        func times(_ banners: Int) -> [Date] {
+            plan(rule, now: wednesday10am, banners: banners)
+                .filter { cal.isDate($0.fireDate, inSameDayAs: at(6, 0)) }.map(\.fireDate).sorted()
+        }
+        #expect(times(1) == [at(6, 7)])
+        #expect(times(3) == [at(6, 7), at(6, 11), at(6, 15)])
+        #expect(times(5) == [at(6, 7), at(6, 11), at(6, 15), at(6, 19)])
+    }
+
+    @Test func missedOneOffNagsAreLimitedBySlider() {
+        let rule = PromptRule(timeHour: 8, timeMinute: 0, oneOff: true)
+        #expect(plan(rule, now: wednesday10am, banners: 1).isEmpty)
+        #expect(plan(rule, now: wednesday10am, banners: 3).filter { $0.kind == .overdue }.count == 2)
+    }
+
+    @Test func bannerSliderLeavesBirthdayLeadInDaysAlone() {
+        let rule = PromptRule(timeHour: 9, timeMinute: 0, oneOff: false, month: 11, day: 18)
+        let planned = plan(rule, now: wednesday10am, banners: 1)
+        #expect(planned.filter { $0.kind == .leadIn }.count == 7)
+        #expect(planned.filter { cal.isDate($0.fireDate, inSameDayAs: at(18, 0)) }.map(\.kind) == [.primary])
     }
 
 }

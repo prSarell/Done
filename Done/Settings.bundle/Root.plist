@@ -40,6 +40,26 @@
 			<key>Type</key>
 			<string>PSGroupSpecifier</string>
 			<key>Title</key>
+			<string>Banners per Reminder</string>
+			<key>FooterText</key>
+			<string>How many banners a reminder with a set day or time sends if you don't tap Done or Skip. Left = 1 (just on time). Middle = 3 (15 min before, on time, 15 min after). Right = 5 (adds 30 min before and after). Rolling prompts always send one.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSSliderSpecifier</string>
+			<key>Key</key>
+			<string>banners_per_reminder</string>
+			<key>DefaultValue</key>
+			<real>3</real>
+			<key>MinimumValue</key>
+			<real>1</real>
+			<key>MaximumValue</key>
+			<real>5</real>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
 			<string>Quiet Hours (All Categories)</string>
 			<key>FooterText</key>
 			<string>No prompts fire before Earliest Reminder or after Latest Reminder, whatever the per-category settings below say.</string>

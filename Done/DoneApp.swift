@@ -35,6 +35,7 @@ struct DoneApp: App {
         UserDefaults.standard.register(defaults: [
             "random_prompts_enabled": true,
             "notification_intensity": 0.5,
+            "banners_per_reminder": 3.0,
             "global_earliest_hour": 7,
             "global_latest_hour": 20,
             "quiet_daily_start": 0, "quiet_daily_end": 0, "quiet_daily_weekends": false,

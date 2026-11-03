@@ -40,6 +40,8 @@ struct ScheduledPlanContext {
     var dayEndHour: Int
     var categoryQuietWindows: [PromptCategory: CategoryQuietWindow] = [:]
     var categoryOf: [UUID: PromptCategory] = [:]
+    /// Banners per occurrence, 1...maxBannersPerReminder (see `ScheduledPromptScheduler.extraOffsets`).
+    var bannersPerReminder: Int = ScheduledPromptScheduler.maxBannersPerReminder
 
     init(
         now: Date,
@@ -47,9 +49,11 @@ struct ScheduledPlanContext {
         dayStartHour: Int,
         dayEndHour: Int,
         categoryQuietWindows: [PromptCategory: CategoryQuietWindow] = [:],
-        categoryPromptIDs: [PromptCategory: Set<UUID>] = [:]
+        categoryPromptIDs: [PromptCategory: Set<UUID>] = [:],
+        bannersPerReminder: Int = ScheduledPromptScheduler.maxBannersPerReminder
     ) {
         self.now = now
+        self.bannersPerReminder = bannersPerReminder
         self.calendar = calendar
         self.dayStartHour = dayStartHour
         self.dayEndHour = dayEndHour
@@ -67,7 +71,8 @@ struct ScheduledPlanContext {
             dayStartHour: rules.dayStartHour,
             dayEndHour: rules.dayEndHour,
             categoryQuietWindows: CategoryQuietWindow.loadAllFromUserDefaults(),
-            categoryPromptIDs: categoryPromptIDs
+            categoryPromptIDs: categoryPromptIDs,
+            bannersPerReminder: rules.bannersPerReminder
         )
     }
 }
@@ -110,6 +115,24 @@ final class ScheduledPromptScheduler {
     private static let overdueFirstDelay: TimeInterval = 60 * 60
     private static let overdueInterval: TimeInterval = 3 * 60 * 60
     private static let maxOverdueNags = 4
+
+    /// The most banners one occurrence of a timed prompt can send: −30, −15, on time,
+    /// +15, +30. The "Banners per Reminder" slider runs from 1 to this.
+    static let maxBannersPerReminder = 5
+
+    /// The extra banners (beyond the primary) allowed at a given slider level, closest to
+    /// the set time first so a middle setting gives −15 / on time / +15.
+    /// - timed: minutes offsets from the set time (negative = run-up nudge)
+    /// - dayOnly: hours after the day's first reminder
+    /// - overdue: how many nags a missed one-off gets
+    static func extraOffsets(bannersPerReminder: Int) -> (timed: [Double], dayOnly: [Double], overdue: Int) {
+        let extras = max(0, min(bannersPerReminder, maxBannersPerReminder) - 1)
+        return (
+            timed: Array([-15.0, 15.0, -30.0, 30.0].prefix(extras)),
+            dayOnly: Array([4.0, 8.0, 12.0].prefix(extras)),
+            overdue: min(extras, maxOverdueNags)
+        )
+    }
 
     private let idPrefix = "sched-"
 
@@ -165,7 +188,8 @@ final class ScheduledPromptScheduler {
                 dayStartHour: globalRules.dayStartHour,
                 dayEndHour: globalRules.dayEndHour,
                 categoryQuietWindows: categoryQuietWindows,
-                categoryPromptIDs: categoryPromptIDs
+                categoryPromptIDs: categoryPromptIDs,
+                bannersPerReminder: globalRules.bannersPerReminder
             )
             let planned = Self.plan(prompts: prompts, rules: rulesByID, events: events, context: context)
             let final = Self.prioritised(planned, now: context.now, cap: Self.scheduledNotificationCap)
@@ -300,6 +324,9 @@ final class ScheduledPromptScheduler {
         let kind = rule.recurrenceKind
         let category = ctx.categoryOf[prompt.id]
         let timed = rule.timeHour != nil && rule.timeMinute != nil
+        let allowance = extraOffsets(bannersPerReminder: ctx.bannersPerReminder)
+        let approachMinutes = allowance.timed.filter { $0 < 0 }.sorted()
+        let followUpMinutes = allowance.timed.filter { $0 > 0 }.sorted()
 
         func settled(_ occurrence: Date) -> Bool {
             let start = rule.cycleStart(for: occurrence, now: now, calendar: cal)
@@ -320,7 +347,7 @@ final class ScheduledPromptScheduler {
         // --- A one-off whose time has passed without Done/Skip -------------------------
         if kind == .oneOff, let missed = rule.previousTarget(before: now, calendar: cal), !settled(missed) {
             if timed {
-                for minutes in [15.0, 30.0] {
+                for minutes in followUpMinutes {
                     let fire = missed.addingTimeInterval(minutes * 60)
                     if fire >= earliest, allowed(fire) { add(.followUp, missed, fire) }
                 }
@@ -330,7 +357,7 @@ final class ScheduledPromptScheduler {
                 var cursor = now.addingTimeInterval(overdueFirstDelay)
                 var count = 0
                 let end = now.addingTimeInterval(24 * 3600)
-                while cursor < end && count < maxOverdueNags {
+                while cursor < end && count < allowance.overdue {
                     if allowed(cursor) { add(.overdue, missed, cursor); count += 1 }
                     cursor = cursor.addingTimeInterval(overdueInterval)
                 }
@@ -344,7 +371,7 @@ final class ScheduledPromptScheduler {
            let previous = rule.previousTarget(before: now, calendar: cal),
            now.timeIntervalSince(previous) <= approachWindow,
            !settled(previous) {
-            for minutes in [15.0, 30.0] {
+            for minutes in followUpMinutes {
                 let fire = previous.addingTimeInterval(minutes * 60)
                 if fire >= earliest, allowed(fire) { add(.followUp, previous, fire) }
             }
@@ -395,17 +422,17 @@ final class ScheduledPromptScheduler {
             }
 
             if timed {
-                for minutes in [-30.0, -15.0] {
+                for minutes in approachMinutes {
                     let fire = occurrence.addingTimeInterval(minutes * 60)
                     if fire >= earliest, allowed(fire) { add(.approach, occurrence, fire) }
                 }
-                for minutes in [15.0, 30.0] {
+                for minutes in followUpMinutes {
                     let fire = occurrence.addingTimeInterval(minutes * 60)
                     if fire >= earliest, allowed(fire) { add(.followUp, occurrence, fire) }
                 }
             } else {
                 // Day-only: a few more reminders through the rest of that day.
-                for hours in [4.0, 8.0, 12.0] {
+                for hours in allowance.dayOnly {
                     let fire = primary.addingTimeInterval(hours * 3600)
                     if fire >= earliest, cal.isDate(fire, inSameDayAs: occurrence), allowed(fire) {
                         add(.followUp, occurrence, fire)
