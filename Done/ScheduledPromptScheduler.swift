@@ -90,17 +90,27 @@ struct ScheduledPlanContext {
 ///    if the app isn't opened for weeks.
 /// 3. Add the optional extras (run-up nudges, follow-ups, lead-in days, overdue nags),
 ///    which do respect quiet hours.
-/// 4. When everything won't fit in the shared budget, primaries win, then the run-up to
-///    anything in the next 24h, then extras — so one busy category can't push another
-///    category's on-time alert out.
+/// 4. When everything won't fit in the shared budget, slots go by time: repeating alerts,
+///    this week's on-time alerts and one extra per prompt due in 48h first; then the rest
+///    (see `prioritised`). Whatever's left is the random feed's budget.
 final class ScheduledPromptScheduler {
     static let shared = ScheduledPromptScheduler()
     private init() {}
 
     // iOS keeps at most ~64 pending notifications per app, shared with RandomPromptScheduler
-    // (which gets whatever this leaves under its combined cap of 60). Capped below 60 so
-    // scheduled prompts can't take the whole budget and starve the random feed.
-    static let scheduledNotificationCap: Int = 40
+    // (which gets whatever this leaves under its combined cap of 60). Scheduled prompts
+    // decide the random budget: what they *need* (repeats, the next week's alerts, one extra
+    // banner for anything due in 48h) may use up to this cap, leaving random at least 10.
+    static let scheduledNotificationCap: Int = 50
+    /// Nice-to-have items (more extras, lead-in days, alerts more than a week away) only fill
+    /// up to this total, so on a normal day the random feed keeps at least 20.
+    static let scheduledSafetyNetCap: Int = 40
+    /// One-off alerts within this window are guaranteed a slot (goal 1: never miss one even
+    /// if the app isn't opened for days). Further out, they're re-planned on every app open.
+    static let guaranteedPrimaryHorizon: TimeInterval = 7 * 24 * 3600
+    /// A prompt due within this window is guaranteed one extra banner, and its other extras
+    /// are queued next if slots allow (goal 2).
+    static let fullBannerHorizon: TimeInterval = 48 * 3600
 
     /// The run-up to a set time (-30, -15 and the time itself).
     static let approachWindow: TimeInterval = 30 * 60
@@ -192,7 +202,7 @@ final class ScheduledPromptScheduler {
                 bannersPerReminder: globalRules.bannersPerReminder
             )
             let planned = Self.plan(prompts: prompts, rules: rulesByID, events: events, context: context)
-            let final = Self.prioritised(planned, now: context.now, cap: Self.scheduledNotificationCap)
+            let final = Self.prioritised(planned, now: context.now)
 
             #if DEBUG
             print("SPS: planned \(planned.count) sched requests, keeping \(final.count)")
@@ -283,33 +293,66 @@ final class ScheduledPromptScheduler {
         }
     }
 
-    /// Orders by importance and trims to `cap`:
-    /// 1. every primary alert, whatever the category or how far off (each prompt has at
-    ///    most three, so these can't swamp the budget — and they're the promise that a
-    ///    reminder arrives when it was set for, even if the app isn't opened in between)
-    /// 2. run-up nudges in the next 24h
-    /// 3. other extras in the next 24h, then 4. everything else — soonest first within each.
+    /// Hands out slots by *time*, not just by kind (see docs/NOTIFICATION_SCHEDULING.md §0, §11).
+    ///
+    /// What scheduled prompts *need* (may use up to `cap`, leaving random at least 60 − cap):
+    /// 0. repeating daily/weekly alerts: one slot each covers every future occurrence
+    /// 1. one-off on-time alerts within `guaranteedPrimaryHorizon` (a week)
+    /// 2. one extra banner (run-up, follow-up or nag) per prompt due within `fullBannerHorizon`
+    ///    (48h), so something due soon is never left with one easy-to-miss banner
+    ///
+    /// Nice to have (only fills up to `safetyNetCap`, so a normal day leaves random ≥ 60 − 40):
+    /// 3. the remaining extras within `fullBannerHorizon` (48h), incl. lead-in days, shared out
+    ///    fairly: every prompt's next extra before anyone's following one
+    /// 4. on-time alerts further out, 5. everything else. The app re-plans on every open,
+    ///    long before these are due.
     static func prioritised(
         _ planned: [PlannedScheduledNotification],
         now: Date,
-        cap: Int
+        cap: Int = scheduledNotificationCap,
+        safetyNetCap: Int = scheduledSafetyNetCap
     ) -> [PlannedScheduledNotification] {
-        func tier(_ p: PlannedScheduledNotification) -> Int {
-            let soon = p.fireDate.timeIntervalSince(now) <= 24 * 3600
-            switch p.kind {
-            case .primary: return 0
-            case .approach: return soon ? 1 : 3
-            case .followUp, .leadIn, .overdue: return soon ? 2 : 3
+        func ahead(_ p: PlannedScheduledNotification) -> TimeInterval { p.fireDate.timeIntervalSince(now) }
+
+        // Each extra's position among its own prompt's extras, soonest first.
+        var extraRank: [Int: Int] = [:]
+        // The one needed extra per prompt: its soonest run-up/follow-up/nag in the next 48h.
+        var neededExtra: Set<Int> = []
+        let extrasByPrompt = Dictionary(grouping: planned.indices.filter { planned[$0].kind != .primary }) { planned[$0].promptID }
+        for (_, indices) in extrasByPrompt {
+            let sorted = indices.sorted { planned[$0].fireDate < planned[$1].fireDate }
+            for (rank, i) in sorted.enumerated() { extraRank[i] = rank }
+            if let first = sorted.first(where: { planned[$0].kind != .leadIn && ahead(planned[$0]) <= fullBannerHorizon }) {
+                neededExtra.insert(first)
             }
         }
-        return Array(
-            planned
-                .sorted { a, b in
-                    let ta = tier(a), tb = tier(b)
-                    return ta != tb ? ta < tb : a.fireDate < b.fireDate
-                }
-                .prefix(cap)
-        )
+
+        func tier(_ i: Int) -> Int {
+            let p = planned[i]
+            if p.kind == .primary {
+                if p.repeating != nil { return 0 }
+                return ahead(p) <= guaranteedPrimaryHorizon ? 1 : 4
+            }
+            if neededExtra.contains(i) { return 2 }
+            return ahead(p) <= fullBannerHorizon ? 3 : 5
+        }
+
+        let ordered = planned.indices.sorted { a, b in
+            let ta = tier(a), tb = tier(b)
+            if ta != tb { return ta < tb }
+            if ta == 3 {
+                let ra = extraRank[a] ?? 0, rb = extraRank[b] ?? 0
+                if ra != rb { return ra < rb }
+            }
+            return planned[a].fireDate < planned[b].fireDate
+        }
+
+        var kept: [PlannedScheduledNotification] = []
+        for i in ordered {
+            guard kept.count < (tier(i) <= 2 ? cap : safetyNetCap) else { break }
+            kept.append(planned[i])
+        }
+        return kept
     }
 
     static func planPrompt(

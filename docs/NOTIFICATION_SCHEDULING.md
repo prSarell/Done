@@ -1,10 +1,32 @@
 # Done! — Notification Scheduling Reference
 
-_Last updated: 2026-11-03 (scheduler rewrite committed 99926ff; Banners per Reminder slider added)_
+_Last updated: 2026-11-04 (Goals added; slots now allocated by time, see §4 step 4 and §11)_
 
 This is the reference for how Done! decides **which notifications fire, when, and for which
 category**. Read it before changing anything in the scheduling code. Most past bugs came from
 fixing one category in a way that quietly broke another (see [History](#7-history-of-bugs-and-fixes)).
+
+---
+
+## 0. Goals (check every change against these)
+
+Agreed with Pat on 2026-11-04 after a run of fixes that each caused the next problem. Any
+scheduling change must say which goal it serves and show it doesn't break a higher one.
+In priority order (what gives way first when slots run out is at the bottom):
+
+1. **Never miss a scheduled prompt.** Every scheduled occurrence (Day, Date or Time set) gets
+   its on-time banner, even if the app isn't opened for a few days.
+2. **A scheduled prompt due soon is properly noticeable.** In the next day or two it gets its
+   full set of banners (run-ups / follow-ups, per the Banners per Reminder slider), not just
+   one easy-to-miss banner. Day-only prompts especially, as their only on-time banner is the
+   first allowed hour (7am).
+3. **The feed stays balanced.** No category crowds out another, and the random feed keeps
+   flowing alongside the scheduled ones.
+4. **Respect what the user set.** A set time fires even in quiet hours; quiet hours hush
+   the random feed and the extra nudges.
+
+Fixes must be general (no one-off special cases for a category or rule shape) and come with
+a test. If a fix only works by trading one goal for another, stop and revisit §11 instead.
 
 ---
 
@@ -17,7 +39,7 @@ Done! has two kinds of prompts, planned by two schedulers that share one iOS lim
 | What | Any prompt with a Day, Date or Time set in the Alert editor | Prompts with no Day/Date/Time (incl. bare "Once" to-dos) |
 | Planned by | `ScheduledPromptScheduler.swift` | `RandomPromptScheduler.swift` |
 | Notification ID prefix | `sched-` | `rand-` |
-| Budget | Up to **40** pending | **60 − (sched pending)** |
+| Budget | What it needs, up to **50**; nice-to-haves only up to **40** (§4 step 4) | **60 − (sched pending)**, so ≥10, ≥20 on a normal day |
 | Quiet hours | Primary alert ignores them, extras respect them | Fully respected |
 | Plans how far ahead | Up to 35 days (repeating triggers cover forever) | Today only |
 
@@ -38,7 +60,7 @@ In-app Done/Skip (PromptsView, StatsView)     ─┘        │  (serialised: a 
                                                          │   queued and runs next, never dropped)
                                                          ▼
                                      ScheduledPromptScheduler.refreshSchedule
-                                       cancel all pending sched-* → plan → prioritise → cap 40
+                                       cancel all pending sched-* → plan → prioritise (≤50)
                                        → await every add (so the count below is accurate)
                                                          ▼
                                      RandomPromptScheduler.continueRefreshAfterScheduledPlanning
@@ -165,15 +187,23 @@ If the next occurrence **is** settled (e.g. Friday's ticked off on Wednesday, or
 at 7:30), a repeating trigger can't skip one date. So the following occurrences get one-off
 primaries instead, and the next re-plan switches back to repeating.
 
-### Step 4: priority under the 40 cap (`prioritised`)
-1. **Every primary**, whatever the category or how far off (each prompt has at most 3)
-2. Approach nudges in the next 24h
-3. Other extras (follow-ups, lead-ins, overdue) in the next 24h
-4. Everything else
+### Step 4: slots by time (`prioritised`, rebuilt 2026-11-04, see §11)
+**Needed**, may use up to `scheduledNotificationCap` (50):
+0. Every **repeating** daily/weekly alert (one slot covers every future occurrence)
+1. Every **one-off on-time alert within 7 days** (`guaranteedPrimaryHorizon`)
+2. **One extra per prompt** due within 48h (`fullBannerHorizon`): its soonest run-up,
+   follow-up or nag (not a lead-in day). This is what stops a day-only prompt being left with
+   a single 7am banner.
 
-Soonest first within each tier. **Rule:** never let extras outrank a primary. That's the guarantee
-that a reminder arrives when it was set for, and it's what stops one busy category (e.g. 15 daily
-med reminders) crowding out another (bins, a birthday).
+**Nice to have**, only fills up to `scheduledSafetyNetCap` (40):
+3. Remaining extras within 48h incl. lead-in days, shared fairly: every prompt's next extra
+   before anyone's following one, then soonest first
+4. On-time alerts more than 7 days away (re-planned on every app open long before they're due)
+5. Everything else
+
+Whatever scheduled leaves is the random feed's budget: ≥10 on a heavy day, ≥20 when only
+nice-to-haves are filling. **Rule:** a near or repeating on-time alert is never cut; far-off
+alerts and extra banners give way first.
 
 ---
 
@@ -243,6 +273,7 @@ The 9pm summary and 8am "done yesterday" update are skipped if their hour falls 
 | 2026-10-31 | Whole Work list missing from random feed | Bare "Once" counted as scheduled | `hasSchedulingRule` false for bare Once |
 | 2026-11-03 | (feature) Too many banners per prompt, no control | Fixed 5-banner pattern | Banners per Reminder slider (see §4 step 2); **default 3 is fewer than the old 5** |
 | **2026-11-03** | Fixing one category kept breaking another; weekly Friday reminders unreliable | Special cases piling up; see list below | **Planner rewrite** (this document) |
+| **2026-11-04** | Mop / Wipe out microwave (day-only weekly) silent since 22 Oct, then only one 7am banner | Slots handed out by kind, not time: on-time alerts up to 2 weeks away filled all 40, no extras survived | **Slots by time** (§4 step 4, §11); sched cap 50 needed / 40 nice-to-have |
 
 ### What the 2026-11-03 rewrite fixed
 - A set time inside quiet hours was silently dropped: weekly 9pm bin night, Work reminders at or
@@ -268,11 +299,12 @@ one-offs first nag after 1h (was instant on every refresh).
 
 1. **Never add a special case for one category or rule shape inside the planner.** Express it as
    occurrences + kinds + tiers, and add a test that pins the case down.
-2. **Primary alerts must always survive the cap.** If the budget is tight, cut extras.
+2. **Repeating and next-7-day on-time alerts must always survive the cap**, plus one extra per
+   prompt due in 48h. If the budget is tight, cut the nice-to-haves (§4 step 4).
 3. **A time the user set is sacred.** Quiet hours govern the random feed and nags, not explicit times.
 4. **Anything that removes pending requests for a prompt must be followed by re-queuing** its next
    occurrence (`requeueNextOccurrence` or a full re-plan), and must finish before the re-plan starts.
-5. **Keep sched ≤ 40 and the combined total ≤ 60.** iOS silently discards beyond 64.
+5. **Keep sched ≤ 50 (nice-to-haves ≤ 40) and the combined total ≤ 60.** iOS silently discards beyond 64.
 6. Every planner change gets a test in `DoneTests.swift`, using the fixed "now" (Wed 4 Nov 2026,
    10:00) helpers, never `Date()`.
 7. Users treat "Once" as "delete when done", not as a schedule (see the 10-31 fix). Two inline
@@ -290,7 +322,7 @@ xcodebuild test -scheme Done \
   -only-testing:DoneTests
 ```
 (Destination by simulator **id** for iPhone 16 Pro. Using `name=` failed on this machine.
-`xcrun simctl list devices available` lists the ids.) 38 tests as of 2026-11-03.
+`xcrun simctl list devices available` lists the ids.) 42 tests as of 2026-11-04.
 
 ### Debug console
 DEBUG builds log every planned notification: `SPS:   primary 'Bins' at … (repeating)`, plus
@@ -333,3 +365,71 @@ Done/Skip settle the occurrence?), and `random_prompt_history.json` (is the rand
 - Time-Sensitive notifications (to break through Focus for ⭐️ prompts) are available now that
   the paid Developer Program is active (2026-09-02), but not implemented.
 - `LockNudgeScheduler` is dead code.
+
+---
+
+## 11. Open: slot-allocation redesign (started 2026-11-04)
+
+**Status:** built 2026-11-04 (`prioritised` + tests). **Needs device test.** On Pat's 2026-11-04
+data: 0 on-time alerts in the next week dropped; Mop and Wipe out microwave get 7am + 11am;
+random budget 10–11 during exam season (18 repeats + 15–17 dated alerts + 15 needed extras).
+**Intended (Pat, 2026-11-04):** a thinner random feed on heavy weeks is right: "on heavy weeks
+less focus is on random stuff." Don't treat it as a bug. If it ever feels too thin, raise the
+floor (lower `scheduledNotificationCap`) rather than re-tuning tiers.
+
+### Why
+The fixes in §7 each re-tuned *who gets the slots* for whatever was missed that week, and the
+next problem surfaced somewhere else. The real constraint never changed: ~64 iOS slots and no
+re-planning unless the app is opened. The planner hands out slots **by kind** (primaries,
+then extras) with **no regard to time**, so slots go to things weeks away while today's
+banners are dropped.
+
+### Evidence (device data and live log, 2026-11-04)
+- Mop (Thu), Wipe out microwave (Wed), Toilet (Mon), Vacuum (Tue): day-only weekly to-dos with
+  a Done/Skip every week until 21–22 Oct, then silent. Cause on the pre-rewrite build (before
+  99926ff): run-up nudges claimed slots first and the rest went soonest first, so day-only
+  prompts (no run-ups) came last and were cut.
+- On the current build: 346 sched requests planned, **all 40 kept are primaries**, reaching
+  out to 16 Nov. Zero extras queued for anything, so the Banners per Reminder slider has no
+  effect, and Mop / Wipe out microwave get only a single 7am banner (11am/3pm follow-ups cut).
+- Each weekly repeat sits ~7 days out right after its day, near the bottom of the 40. A few
+  more dated items and it would be cut until the next re-plan (goal 1 at risk).
+- A daily prompt already done today takes 3 one-off slots (e.g. Ritalin – Morning) instead of 1.
+
+### New approach: allocate by time, scheduled sets the random budget
+"Slots" means iOS's pending queue (what's waiting to fire right now), not a per-day count.
+A weekly prompt like Mop is **one** repeating entry that sits in the queue all week and fires
+only on Thursday. It doesn't take a slot on each day, but while it waits it's one fewer slot
+for everything else, including today's random feed. ~25 daily/weekly repeats → ~25 slots
+permanently taken, which is the cheapest way to guarantee goal 1. The squeeze comes from
+one-off items weeks away, which under this plan only take a slot once they're near.
+
+Plan the queue as one whole, in this order:
+
+1. **Repeating triggers** for every daily/weekly prompt (one slot each, cover forever).
+2. **On-time banners for one-off occurrences in the next ~7 days** (dated, monthly, yearly,
+   fortnightly, Once).
+3. **Full banner set for anything due in the next 24–48h** (run-ups, follow-ups, day-only
+   follow-ups, overdue nags, lead-in banners for those days).
+4. **Thin safety net beyond that:** further-out on-time banners only if slots remain. They're
+   re-planned on every app open long before they're due.
+5. **Random feed gets what's left today** — i.e. the scheduled prompts define how many random
+   prompts you can get that day. Busy scheduled day → fewer random; quiet day → more.
+
+Open decisions:
+- **Random floor?** With "random gets what's left", a heavy scheduled day could starve the feed
+  (the 2026-10-03 bug). Time-based allocation should keep scheduled demand far lower than today's
+  40, but decide whether to keep a minimum (e.g. 10/day) for random as a backstop.
+- **Horizons:** exact values for "full banners" (24h vs 48h) and "on-time" (7 days).
+- **Replaces the fixed 40 cap** and rule-of-thumb 2 in §8 ("primaries always survive") becomes
+  "near primaries and repeats always survive". Update §1, §4 step 4 and §8 when built.
+- ~~Daily prompt done today: fall back to 1 one-off, not 3.~~ Rejected: the 3 cover the app not
+  being opened for a few days (goal 1). Under §4 step 4 they're cheap anyway.
+- Decided: random floor 10 (60 − 50), full-banner horizon 48h, on-time horizon 7 days.
+
+### Before building
+1. Count real demand from device data under the new tiers (how many slots does a typical day
+   need?) to settle the horizons and the floor.
+2. Write tests first, one per goal, using the 2026-11-04 device data shape (Mop/Wipe out
+   microwave getting follow-ups; weekly repeat never cut; random never below the floor).
+3. Device test: Mop Thu and Wipe out microwave Wed get 7am + follow-ups; random still flowing.

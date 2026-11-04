@@ -93,7 +93,10 @@ struct DoneTests {
     // now capped lower, and whatever budget random prompts get is spread across the day.
 
     @Test func scheduledCapAlwaysLeavesRoomForRandomPrompts() {
-        #expect(ScheduledPromptScheduler.scheduledNotificationCap <= 40)
+        // Combined cap is 60: a heavy scheduled day still leaves random at least 10, and
+        // a normal day (safety net filled, nothing more needed) leaves it 20.
+        #expect(ScheduledPromptScheduler.scheduledNotificationCap <= 50)
+        #expect(ScheduledPromptScheduler.scheduledSafetyNetCap <= 40)
     }
 
     private func todayAt(_ hour: Int) -> Date {
@@ -302,16 +305,103 @@ struct DoneTests {
         let birthday = PromptItem(text: "Birthday")
         prompts += [bins, birthday]
         rules[bins.id.uuidString] = PromptRule(weekday: friday, oneOff: false)
-        rules[birthday.id.uuidString] = PromptRule(oneOff: false, month: 11, day: 20)
+        rules[birthday.id.uuidString] = PromptRule(oneOff: false, month: 11, day: 9)
 
         let ctx = ScheduledPlanContext(now: now, calendar: cal, dayStartHour: 7, dayEndHour: 20)
         let planned = ScheduledPromptScheduler.plan(prompts: prompts, rules: rules, events: [], context: ctx)
         #expect(planned.count > ScheduledPromptScheduler.scheduledNotificationCap)
 
-        let kept = ScheduledPromptScheduler.prioritised(planned, now: now, cap: ScheduledPromptScheduler.scheduledNotificationCap)
-        #expect(kept.count == ScheduledPromptScheduler.scheduledNotificationCap)
+        let kept = ScheduledPromptScheduler.prioritised(planned, now: now)
+        #expect(kept.count <= ScheduledPromptScheduler.scheduledNotificationCap)
         let keptPrimaryIDs = Set(kept.filter { $0.kind == .primary }.map(\.promptID))
         #expect(keptPrimaryIDs == Set(prompts.map(\.id)))
+    }
+
+    // MARK: - Slot allocation by time (docs/NOTIFICATION_SCHEDULING.md §0, §11)
+    // Real shape from Pat's phone on 2026-11-04: ~25 daily/weekly repeats plus a long list of
+    // dated items weeks away took all 40 slots as on-time alerts, so day-only weekly to-dos
+    // (Mop, Wipe out microwave) were left with a single 7am banner and no follow-ups.
+
+    private func busyWeek(now: Date) -> (prompts: [PromptItem], rules: [String: PromptRule], mop: PromptItem) {
+        var prompts: [PromptItem] = []
+        var rules: [String: PromptRule] = [:]
+        for i in 0..<15 {   // daily meds/chores with set times
+            let p = PromptItem(text: "Daily \(i)")
+            prompts.append(p)
+            rules[p.id.uuidString] = PromptRule(timeHour: 8 + i % 12, timeMinute: i, oneOff: false)
+        }
+        for i in 0..<30 {   // exams, appointments, birthdays 8–37 days out
+            let p = PromptItem(text: "Dated \(i)")
+            prompts.append(p)
+            let d = cal.date(byAdding: .day, value: 8 + i, to: cal.startOfDay(for: now))!
+            rules[p.id.uuidString] = PromptRule(timeHour: 9, timeMinute: 0, date: d, oneOff: true)
+        }
+        let mop = PromptItem(text: "Mop")
+        prompts.append(mop)
+        rules[mop.id.uuidString] = PromptRule(weekday: 5, oneOff: false)   // Thursday, no time
+        return (prompts, rules, mop)
+    }
+
+    private func keep(_ week: (prompts: [PromptItem], rules: [String: PromptRule], mop: PromptItem), now: Date) -> [PlannedScheduledNotification] {
+        let ctx = ScheduledPlanContext(now: now, calendar: cal, dayStartHour: 7, dayEndHour: 20,
+                                       categoryPromptIDs: [.weekly: [week.mop.id]], bannersPerReminder: 3)
+        let planned = ScheduledPromptScheduler.plan(prompts: week.prompts, rules: week.rules, events: [], context: ctx)
+        return ScheduledPromptScheduler.prioritised(planned, now: now)
+    }
+
+    @Test func dayOnlyWeeklyGetsItsFollowUpsInABusyWeek() {
+        let now = wednesday10am
+        let week = busyWeek(now: now)
+        let kept = keep(week, now: now)
+        let mop = kept.filter { $0.promptID == week.mop.id }
+        #expect(mop.contains { $0.kind == .primary && $0.repeating != nil })
+        let thursday = at(5, 0)
+        let followUps = mop.filter { $0.kind == .followUp && cal.isDate($0.fireDate, inSameDayAs: thursday) }
+        #expect(followUps.count >= 1)   // guaranteed one; more only if slots allow
+        // Needed items alone may use up to 50; nice-to-haves stop at 40.
+        #expect(kept.count <= ScheduledPromptScheduler.scheduledNotificationCap)
+    }
+
+    @Test func everyRepeatingAndThisWeeksAlertSurvivesTheCap() {
+        let now = wednesday10am
+        let week = busyWeek(now: now)
+        let kept = keep(week, now: now)
+        let repeats = Set(kept.filter { $0.repeating != nil }.map(\.promptID))
+        let dailyAndWeekly = week.prompts.filter { !$0.text.hasPrefix("Dated") }.map(\.id)
+        #expect(repeats == Set(dailyAndWeekly))
+        #expect(kept.count <= ScheduledPromptScheduler.scheduledNotificationCap)
+    }
+
+    @Test func farOffAlertGivesWayButIsBackWithinAWeek() {
+        let week = busyWeek(now: wednesday10am)
+        let dated0 = week.prompts.first { $0.text == "Dated 0" }!   // 8 days out
+        let today = keep(week, now: wednesday10am)
+        #expect(!today.contains { $0.promptID == dated0.id && $0.kind == .primary }
+                || today.count <= ScheduledPromptScheduler.scheduledSafetyNetCap)
+        let twoDaysLater = keep(week, now: at(6, 10))   // now 6 days before it
+        #expect(twoDaysLater.contains { $0.promptID == dated0.id && $0.kind == .primary })
+    }
+
+    @Test func extrasAreSharedSoOneBusyListCannotTakeThemAll() {
+        // 40 timed dailies each want 2 extras per day over 48h: far more than the budget.
+        let now = wednesday10am
+        var prompts: [PromptItem] = []
+        var rules: [String: PromptRule] = [:]
+        for i in 0..<40 {
+            let p = PromptItem(text: "Daily \(i)")
+            prompts.append(p)
+            rules[p.id.uuidString] = PromptRule(timeHour: 11, timeMinute: i, oneOff: false)
+        }
+        let mop = PromptItem(text: "Mop")
+        prompts.append(mop)
+        rules[mop.id.uuidString] = PromptRule(weekday: 5, oneOff: false)
+        let ctx = ScheduledPlanContext(now: now, calendar: cal, dayStartHour: 7, dayEndHour: 20, bannersPerReminder: 3)
+        let planned = ScheduledPromptScheduler.plan(prompts: prompts, rules: rules, events: [], context: ctx)
+        let kept = ScheduledPromptScheduler.prioritised(planned, now: now)
+        let extrasPerPrompt = Dictionary(grouping: kept.filter { $0.kind != .primary }, by: \.promptID).mapValues(\.count)
+        // Budget too short for everyone's first extra, so nobody gets a second.
+        #expect(!extrasPerPrompt.isEmpty)
+        #expect(extrasPerPrompt.values.allSatisfy { $0 == 1 })
     }
 
     @Test func dailyRuleDescribesItselfAsEveryDay() {
