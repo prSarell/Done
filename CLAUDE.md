@@ -12,6 +12,17 @@ In priority order; what gives way when the ~64 iOS slots run out is at the botto
    Scheduled prompts define how many random prompts fit in a day.
 4. **A set time is respected**, even in quiet hours.
 
+**The run-up is a key design feature: preserve it** (Pat, 2026-11-14). The run-up is the
+banners *before* a scheduled prompt is due: the −30/−15 nudges before a set time (`approach`),
+and the warning days before a dated prompt (`leadIn`, e.g. an appointment's day-before banner).
+It's what gives you time to act, unlike an on-time banner at the appointment time itself (the
+cause of the missed x-ray, 2026-11-13). A scheduling change must not quietly cut it. Don't
+confuse it with the Settings switch called "Rolling Prompts", which is the random feed.
+Going forward Pat may want users to be able to **dampen the run-up or switch it off**. Today
+the Banners per Reminder slider (Settings app, 1–5, default 3) does this globally, and 1 means
+no run-up. Any new control should build on that slider (`extraOffsets`), not add a second
+mechanism. Treat it as a feature to raise with Pat, not something to build unasked.
+
 **Don't patch priorities or caps one bug at a time.** That's what kept creating new problems.
 The agreed fix is the time-based slot-allocation redesign in `docs/NOTIFICATION_SCHEDULING.md`
 §11 (built 2026-11-04, see §4 step 4; needs device test). Any scheduling bug should be fixed by advancing that plan, or by a

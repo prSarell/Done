@@ -25,6 +25,13 @@ In priority order (what gives way first when slots run out is at the bottom):
 4. **Respect what the user set.** A set time fires even in quiet hours; quiet hours hush
    the random feed and the extra nudges.
 
+**The run-up is a key design feature** (Pat, 2026-11-14): the banners *before* a scheduled
+prompt is due, i.e. `approach` (−30/−15 before a set time) and `leadIn` (days before a dated
+prompt, incl. an appointment's day-before warning). Preserve it in every change. It is not the
+"Rolling Prompts" switch, which is the random feed. The user's control over it is the
+Banners per Reminder slider (§4 step 2, 1 = no run-up). A future in-app or per-prompt way to
+dampen or switch it off may be wanted; build it on that slider's `extraOffsets`, not as a new path.
+
 Fixes must be general (no one-off special cases for a category or rule shape) and come with
 a test. If a fix only works by trading one goal for another, stop and revisit §11 instead.
 
