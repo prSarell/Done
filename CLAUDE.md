@@ -18,6 +18,10 @@ The agreed fix is the time-based slot-allocation redesign in `docs/NOTIFICATION_
 change you can show serves a goal above without breaking a higher one. If a fix trades one goal
 for another, stop and raise it with Pat. Keep §0 and §11 of the doc current.
 
+- **Before editing any code, review it for dependencies.** Find every caller, observer and shared
+  state the change touches (grep for the type/function/property names across the whole project,
+  including tests, Settings.bundle keys and notification identifiers), and read those call sites
+  before making the edit. Mention anything the change will ripple into.
 - **Before touching notifications or scheduling** (`ScheduledPromptScheduler`, `RandomPromptScheduler`,
   `PromptRules`, `NotificationManager`, `PromptNotificationDelegate`, Done/Skip handling), read
   `docs/NOTIFICATION_SCHEDULING.md`. It covers how all categories share the 64-notification limit,

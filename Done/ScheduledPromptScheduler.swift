@@ -108,9 +108,14 @@ final class ScheduledPromptScheduler {
     /// One-off alerts within this window are guaranteed a slot (goal 1: never miss one even
     /// if the app isn't opened for days). Further out, they're re-planned on every app open.
     static let guaranteedPrimaryHorizon: TimeInterval = 7 * 24 * 3600
-    /// A prompt due within this window is guaranteed one extra banner, and its other extras
-    /// are queued next if slots allow (goal 2).
+    /// A prompt due within this window is guaranteed one extra banner (its soonest run-up,
+    /// follow-up, nag or day-before warning), and its other extras are queued next if slots
+    /// allow (goal 2).
     static let fullBannerHorizon: TimeInterval = 48 * 3600
+    /// Every extra banner firing within this window is *needed*, not a nice-to-have: the
+    /// next day's run-ups, follow-ups and day-before warnings are what make a prompt due
+    /// soon noticeable (goal 2), and they outrank the random feed (goal 3).
+    static let nextDayHorizon: TimeInterval = 24 * 3600
 
     /// The run-up to a set time (-30, -15 and the time itself).
     static let approachWindow: TimeInterval = 30 * 60
@@ -298,14 +303,21 @@ final class ScheduledPromptScheduler {
     /// What scheduled prompts *need* (may use up to `cap`, leaving random at least 60 − cap):
     /// 0. repeating daily/weekly alerts: one slot each covers every future occurrence
     /// 1. one-off on-time alerts within `guaranteedPrimaryHorizon` (a week)
-    /// 2. one extra banner (run-up, follow-up or nag) per prompt due within `fullBannerHorizon`
-    ///    (48h), so something due soon is never left with one easy-to-miss banner
+    /// 2. for each occurrence due within `fullBannerHorizon` (48h): its soonest extra banner
+    ///    (an appointment's day-before warning counts) and every other extra of it firing
+    ///    within `nextDayHorizon` (24h). Shared out fairly: every prompt's next extra before
+    ///    anyone's following one, then soonest first. With many timed dailies this can still
+    ///    pass `cap`, so tomorrow's second extras are the first to go; they come back when
+    ///    the app is next opened.
     ///
-    /// Nice to have (only fills up to `safetyNetCap`, so a normal day leaves random ≥ 60 − 40):
-    /// 3. the remaining extras within `fullBannerHorizon` (48h), incl. lead-in days, shared out
-    ///    fairly: every prompt's next extra before anyone's following one
+    /// Nice to have (only fills up to `safetyNetCap`):
+    /// 3. the remaining extras within `fullBannerHorizon` (48h), shared out the same way
     /// 4. on-time alerts further out, 5. everything else. The app re-plans on every open,
     ///    long before these are due.
+    ///
+    /// Before 2026-11-14 the next day's extras were nice-to-haves. On a normal week the
+    /// needed items alone passed 40, so every prompt got at most one extra banner and no
+    /// appointment got its day-before warning.
     static func prioritised(
         _ planned: [PlannedScheduledNotification],
         now: Date,
@@ -316,14 +328,20 @@ final class ScheduledPromptScheduler {
 
         // Each extra's position among its own prompt's extras, soonest first.
         var extraRank: [Int: Int] = [:]
-        // The one needed extra per prompt: its soonest run-up/follow-up/nag in the next 48h.
+        // Needed extras belong to an occurrence *due* within 48h (so a lead-in for something
+        // a week away doesn't count, but an appointment's day-before warning does): its
+        // soonest extra, plus every extra of it firing in the next 24h.
         var neededExtra: Set<Int> = []
         let extrasByPrompt = Dictionary(grouping: planned.indices.filter { planned[$0].kind != .primary }) { planned[$0].promptID }
         for (_, indices) in extrasByPrompt {
             let sorted = indices.sorted { planned[$0].fireDate < planned[$1].fireDate }
             for (rank, i) in sorted.enumerated() { extraRank[i] = rank }
-            if let first = sorted.first(where: { planned[$0].kind != .leadIn && ahead(planned[$0]) <= fullBannerHorizon }) {
+            let dueSoon = sorted.filter { planned[$0].occurrence.timeIntervalSince(now) <= fullBannerHorizon }
+            if let first = dueSoon.first, ahead(planned[first]) <= fullBannerHorizon {
                 neededExtra.insert(first)
+            }
+            for i in dueSoon where ahead(planned[i]) <= nextDayHorizon {
+                neededExtra.insert(i)
             }
         }
 
@@ -340,7 +358,7 @@ final class ScheduledPromptScheduler {
         let ordered = planned.indices.sorted { a, b in
             let ta = tier(a), tb = tier(b)
             if ta != tb { return ta < tb }
-            if ta == 3 {
+            if ta == 2 || ta == 3 {
                 let ra = extraRank[a] ?? 0, rb = extraRank[b] ?? 0
                 if ra != rb { return ra < rb }
             }

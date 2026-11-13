@@ -1,6 +1,6 @@
 # Done! — Notification Scheduling Reference
 
-_Last updated: 2026-11-04 (Goals added; slots now allocated by time, see §4 step 4 and §11)_
+_Last updated: 2026-11-14 (next day's extras and day-before warnings now needed, see §4 step 4 and §7)_
 
 This is the reference for how Done! decides **which notifications fire, when, and for which
 category**. Read it before changing anything in the scheduling code. Most past bugs came from
@@ -191,18 +191,22 @@ primaries instead, and the next re-plan switches back to repeating.
 **Needed**, may use up to `scheduledNotificationCap` (50):
 0. Every **repeating** daily/weekly alert (one slot covers every future occurrence)
 1. Every **one-off on-time alert within 7 days** (`guaranteedPrimaryHorizon`)
-2. **One extra per prompt** due within 48h (`fullBannerHorizon`): its soonest run-up,
-   follow-up or nag (not a lead-in day). This is what stops a day-only prompt being left with
-   a single 7am banner.
+2. Extras for any occurrence **due within 48h** (`fullBannerHorizon`, judged by the
+   occurrence, not the banner): its soonest extra (a lead-in day counts, so an appointment
+   gets its day-before warning), plus **every** extra of it firing in the next 24h
+   (`nextDayHorizon`). Shared fairly: every prompt's next extra before anyone's following
+   one, then soonest first. With many timed dailies this tier alone can pass 50, so
+   tomorrow's second extras are the first cut; they come back on the next app open.
 
 **Nice to have**, only fills up to `scheduledSafetyNetCap` (40):
-3. Remaining extras within 48h incl. lead-in days, shared fairly: every prompt's next extra
-   before anyone's following one, then soonest first
+3. Remaining extras within 48h (e.g. lead-in days for things due later in the week),
+   shared the same way
 4. On-time alerts more than 7 days away (re-planned on every app open long before they're due)
 5. Everything else
 
-Whatever scheduled leaves is the random feed's budget: ≥10 on a heavy day, ≥20 when only
-nice-to-haves are filling. **Rule:** a near or repeating on-time alert is never cut; far-off
+Whatever scheduled leaves is the random feed's budget: ≥10. In practice the needed tiers
+reach 50 on most days now (Pat's 2026-11-14 data: 31 repeats/alerts + ~25 extras due soon),
+so expect ~10 random prompts a day; 40 only matters on a light week. **Rule:** a near or repeating on-time alert is never cut; far-off
 alerts and extra banners give way first.
 
 ---
@@ -273,6 +277,7 @@ The 9pm summary and 8am "done yesterday" update are skipped if their hour falls 
 | 2026-10-31 | Whole Work list missing from random feed | Bare "Once" counted as scheduled | `hasSchedulingRule` false for bare Once |
 | 2026-11-03 | (feature) Too many banners per prompt, no control | Fixed 5-banner pattern | Banners per Reminder slider (see §4 step 2); **default 3 is fewer than the old 5** |
 | **2026-11-03** | Fixing one category kept breaking another; weekly Friday reminders unreliable | Special cases piling up; see list below | **Planner rewrite** (this document) |
+| **2026-11-14** | Missed Pia's x-ray (Fri 13 Nov, set time): only banners at/after the time. No rolling banners on scheduled prompts. Day-only jobs never got their 3pm | Needed tiers alone were 43 on a normal week, over the 40 nice-to-have cap, so every prompt got one extra at most and lead-in days (incl. the day-before warning) were never queued. The banner after the appointment was a follow-up/overdue nag | Next 24h's extras and the soonest extra per occurrence due in 48h (lead-ins included) are now needed (§4 step 4), up to 50. Random feed ~10/day |
 | **2026-11-04** | Mop / Wipe out microwave (day-only weekly) silent since 22 Oct, then only one 7am banner | Slots handed out by kind, not time: on-time alerts up to 2 weeks away filled all 40, no extras survived | **Slots by time** (§4 step 4, §11); sched cap 50 needed / 40 nice-to-have |
 
 ### What the 2026-11-03 rewrite fixed
@@ -299,8 +304,8 @@ one-offs first nag after 1h (was instant on every refresh).
 
 1. **Never add a special case for one category or rule shape inside the planner.** Express it as
    occurrences + kinds + tiers, and add a test that pins the case down.
-2. **Repeating and next-7-day on-time alerts must always survive the cap**, plus one extra per
-   prompt due in 48h. If the budget is tight, cut the nice-to-haves (§4 step 4).
+2. **Repeating and next-7-day on-time alerts must always survive the cap**, plus the extras of
+   anything due in 48h (§4 step 4). If the budget is tight, cut the nice-to-haves (§4 step 4).
 3. **A time the user set is sacred.** Quiet hours govern the random feed and nags, not explicit times.
 4. **Anything that removes pending requests for a prompt must be followed by re-queuing** its next
    occurrence (`requeueNextOccurrence` or a full re-plan), and must finish before the re-plan starts.
@@ -322,7 +327,7 @@ xcodebuild test -scheme Done \
   -only-testing:DoneTests
 ```
 (Destination by simulator **id** for iPhone 16 Pro. Using `name=` failed on this machine.
-`xcrun simctl list devices available` lists the ids.) 42 tests as of 2026-11-04.
+`xcrun simctl list devices available` lists the ids.) 47 tests as of 2026-11-14.
 
 ### Debug console
 DEBUG builds log every planned notification: `SPS:   primary 'Bins' at … (repeating)`, plus
@@ -370,7 +375,7 @@ Done/Skip settle the occurrence?), and `random_prompt_history.json` (is the rand
 
 ## 11. Open: slot-allocation redesign (started 2026-11-04)
 
-**Status:** built 2026-11-04 (`prioritised` + tests). **Needs device test.** On Pat's 2026-11-04
+**Status:** built 2026-11-04 (`prioritised` + tests); 2026-11-14 the next day's extras moved from nice-to-have to needed (§7). **Needs device test.** On Pat's 2026-11-04
 data: 0 on-time alerts in the next week dropped; Mop and Wipe out microwave get 7am + 11am;
 random budget 10–11 during exam season (18 repeats + 15–17 dated alerts + 15 needed extras).
 **Intended (Pat, 2026-11-04):** a thinner random feed on heavy weeks is right: "on heavy weeks

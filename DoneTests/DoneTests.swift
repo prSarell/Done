@@ -404,6 +404,112 @@ struct DoneTests {
         #expect(extrasPerPrompt.values.allSatisfy { $0 == 1 })
     }
 
+    // MARK: - Next day's banners are needed, not nice-to-have (2026-11-14)
+    // Real shape from Pat's phone on 2026-11-14: 12 timed dailies + 10 weeklies (22 repeats)
+    // and 9 dated alerts this week took 43 slots before any nice-to-have, so the 40 cap left
+    // every prompt one extra at most: no +15s, no 3pm for day-only jobs, and no day-before
+    // warning for Pia's x-ray (Fri 13 Nov, set time), which was only noticed from the
+    // overdue nag the next morning.
+
+    private func realWeek(now: Date, appointment: Date, mopDay: Date? = nil) -> (prompts: [PromptItem], rules: [String: PromptRule], ctx: ScheduledPlanContext, xray: PromptItem, mop: PromptItem) {
+        var prompts: [PromptItem] = []
+        var rules: [String: PromptRule] = [:]
+        let dailyTimes = [(8, 0), (8, 0), (8, 15), (8, 35), (9, 0), (9, 25), (13, 0), (18, 0), (20, 30), (21, 0), (21, 0), (21, 0)]
+        for (i, t) in dailyTimes.enumerated() {
+            let p = PromptItem(text: "Daily \(i)")
+            prompts.append(p)
+            rules[p.id.uuidString] = PromptRule(timeHour: t.0, timeMinute: t.1, oneOff: false)
+        }
+        for i in 0..<6 {   // timed weeklies (classes, singing, bins)
+            let p = PromptItem(text: "Weekly \(i)")
+            prompts.append(p)
+            rules[p.id.uuidString] = PromptRule(timeHour: 14 + i, timeMinute: 30, weekday: 1 + i, oneOff: false)
+        }
+        for wd in [2, 3, 4] {   // day-only weekly chores (Toilet, Vacuum, Wipe out microwave)
+            let p = PromptItem(text: "Chore \(wd)")
+            prompts.append(p)
+            rules[p.id.uuidString] = PromptRule(weekday: wd, oneOff: false)
+        }
+        let mop = PromptItem(text: "Mop")
+        prompts.append(mop)
+        let mopOn = mopDay ?? cal.date(byAdding: .day, value: 1, to: now)!
+        rules[mop.id.uuidString] = PromptRule(weekday: cal.component(.weekday, from: mopOn), oneOff: false)
+        for i in 0..<8 {   // exams, marking, appointments over the next week
+            let p = PromptItem(text: "Dated \(i)")
+            prompts.append(p)
+            let d = cal.date(byAdding: .day, value: 2 + i % 6, to: cal.startOfDay(for: now))!
+            rules[p.id.uuidString] = PromptRule(timeHour: 9 + i % 4, timeMinute: 0, date: d, oneOff: true)
+        }
+        let xray = PromptItem(text: "Pia X-rays")
+        prompts.append(xray)
+        rules[xray.id.uuidString] = PromptRule(timeHour: cal.component(.hour, from: appointment), timeMinute: 0,
+                                               date: cal.startOfDay(for: appointment), oneOff: true)
+        let ctx = ScheduledPlanContext(now: now, calendar: cal, dayStartHour: 7, dayEndHour: 22,
+                                       categoryPromptIDs: [.weekly: [mop.id], .mentalHealth: [xray.id]],
+                                       bannersPerReminder: 3)
+        return (prompts, rules, ctx, xray, mop)
+    }
+
+    private func keptFor(_ w: (prompts: [PromptItem], rules: [String: PromptRule], ctx: ScheduledPlanContext, xray: PromptItem, mop: PromptItem)) -> [PlannedScheduledNotification] {
+        let planned = ScheduledPromptScheduler.plan(prompts: w.prompts, rules: w.rules, events: [], context: w.ctx)
+        return ScheduledPromptScheduler.prioritised(planned, now: w.ctx.now)
+    }
+
+    @Test func appointmentGetsItsRunUpWhenPlannedTheEveningBefore() {
+        // Thursday 12 Nov, 8pm; the x-ray is Friday 13 Nov at 10am.
+        let w = realWeek(now: at(12, 20), appointment: at(13, 10))
+        let kept = keptFor(w)
+        let xray = kept.filter { $0.promptID == w.xray.id }
+        #expect(xray.contains { $0.kind == .primary && $0.fireDate == at(13, 10) })
+        #expect(xray.contains { $0.kind == .approach && $0.fireDate == at(13, 9, 45) })
+        #expect(kept.count <= ScheduledPromptScheduler.scheduledNotificationCap)
+    }
+
+    @Test func appointmentGetsItsDayBeforeWarningWhenPlannedTwoDaysAhead() {
+        // Wednesday 11 Nov, 11am: the x-ray is 47h away, its day-before warning (Thu 10am) 23h.
+        let w = realWeek(now: at(11, 11), appointment: at(13, 10))
+        let xray = keptFor(w).filter { $0.promptID == w.xray.id }
+        #expect(xray.contains { $0.kind == .leadIn && cal.isDate($0.fireDate, inSameDayAs: at(12, 0)) })
+    }
+
+    @Test func timedDailiesGetMoreThanOneRollingBannerAgain() {
+        // Saturday 14 Nov, 8:31am (the moment of the device log). Slider 3 = −15, on time,
+        // +15. Before the fix the 40 cap left exactly one extra per prompt. Now every daily
+        // keeps its next extra and the spare room goes to second extras, soonest first.
+        // Not all of them fit in 50 with 12 timed dailies: that's the iOS limit, not a bug.
+        let w = realWeek(now: at(14, 8, 31), appointment: at(20, 10))
+        let kept = keptFor(w)
+        let dailyIDs = Set(w.prompts.filter { $0.text.hasPrefix("Daily") }.map(\.id))
+        let extras = Dictionary(grouping: kept.filter { dailyIDs.contains($0.promptID) && $0.kind != .primary }, by: \.promptID)
+        #expect(Set(extras.keys) == dailyIDs)
+        #expect(extras.values.contains { $0.count >= 2 })
+        #expect(kept.count == ScheduledPromptScheduler.scheduledNotificationCap)
+    }
+
+    @Test func dayOnlyChoreGetsMoreThanItsSevenAmBanner() {
+        // Wednesday 8pm, Mop is tomorrow: 7am plus at least the 11am follow-up.
+        let w = realWeek(now: at(18, 20), appointment: at(20, 10))
+        let mop = keptFor(w).filter { $0.promptID == w.mop.id }.map(\.fireDate)
+        #expect(mop.contains(at(19, 7)))
+        #expect(mop.contains(at(19, 11)))
+    }
+
+    @Test func dayOnlyChoreKeepsItsAfternoonBannerOnTheDay() {
+        // Opened Thursday at 12:30: the 3pm follow-up is the soonest extra and is kept.
+        let w = realWeek(now: at(19, 12, 30), appointment: at(20, 10), mopDay: at(19, 0))
+        let mop = keptFor(w).filter { $0.promptID == w.mop.id }.map(\.fireDate)
+        #expect(mop.contains(at(19, 15)))
+    }
+
+    @Test func randomFeedKeepsItsFloorOnARealWeek() {
+        for now in [at(11, 9), at(12, 20), at(14, 8, 31), at(18, 20)] {
+            let kept = keptFor(realWeek(now: now, appointment: at(13, 10)))
+            #expect(kept.count <= ScheduledPromptScheduler.scheduledNotificationCap)
+            // Every repeat and this week's alerts still survive (goal 1).
+            #expect(kept.filter { $0.repeating != nil }.count == 22)
+        }
+    }
+
     @Test func dailyRuleDescribesItselfAsEveryDay() {
         #expect(PromptRule(timeHour: 8, timeMinute: 0, oneOff: false).scheduleDescription.hasPrefix("Every day"))
         #expect(PromptRule(timeHour: 8, timeMinute: 0, oneOff: true).recurrenceKind == .oneOff)
@@ -628,3 +734,4 @@ struct DoneTests {
     }
 
 }
+
